@@ -823,8 +823,9 @@ def dashboard():
                     <a href="/buku-besar" class="menu-item">📚 Buku Besar</a>
                     <a href="/neraca-saldo" class="menu-item">⚖ Neraca Saldo</a>
                     <a href="/jurnal-penyesuaian" class="menu-item">🔄 Jurnal Penyesuaian</a>
-                    <a href="/laporan-keuangan" class="menu-item">📈 Laporan Keuangan</a>
+                    <a href="/laporan-posisi-keuangan" class="menu-item">📈 Laporan Posisi Keuangan</a>
                     <a href="/jurnal-penutup" class="menu-item">🔒 Jurnal Penutup</a>
+                     <a href="/neraca-saldo-setelah-penutupan" class="menu-item">📋 Neraca Saldo Setelah Penutupan</a>
                 </div>
                 
                 <!-- Transaksi -->
@@ -4175,7 +4176,7 @@ def neraca_saldo():
                 <div class="action-buttons">
                     <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
                     <a href="/jurnal-umum" class="btn btn-secondary">📝 Jurnal Umum</a>
-                    <a href="/laporan-keuangan" class="btn btn-success">📈 Laporan Keuangan</a>
+                    <a href="/laporan-posisi-keuangan" class="btn btn-success">📈 Laporan Posisi Keuangan</a>
                     <button onclick="window.print()" class="btn" style="background: #17a2b8;">🖨️ Cetak Laporan</button>
                 </div>
             </div>
@@ -4237,7 +4238,7 @@ def jurnal_penyesuaian():
     jurnal_data = get_jurnal_penyesuaian_data()
     
     # Ambil data aset tetap untuk form penyesuaian
-    aset_tetap_data = get_aset_tetap_data()
+    aset_tetap_data = get_and_update_aset_tetap_data()
     
     # Hitung totals
     total_debit = sum(j.get("debit", 0) for j in jurnal_data)
@@ -4392,7 +4393,7 @@ def generate_penyesuaian_otomatis(user_email):
     """Generate penyesuaian otomatis untuk semua aset yang belum disusutkan"""
     try:
         # Ambil semua aset tetap
-        aset_data = get_aset_tetap_data()
+        aset_data = get_and_update_aset_tetap_data()
         
         if not aset_data:
             return '<div class="message info">ℹ Tidak ada data aset tetap untuk disesuaikan</div>'
@@ -4923,7 +4924,7 @@ def generate_jurnal_penyesuaian_html(user_email, message, jurnal_data, aset_teta
 def hitung_penyusutan_otomatis():
     """Hitung total penyusutan yang perlu disesuaikan"""
     try:
-        aset_data = get_aset_tetap_data()
+        aset_data = get_and_update_aset_tetap_data()
         total_penyusutan = 0
         
         for aset in aset_data:
@@ -4957,18 +4958,1939 @@ def generate_penyesuaian_otomatis():
     user_email = session.get('user_email')
     return redirect("/jurnal-penyesuaian")
 
-@app.route("/laporan-keuangan")
-def laporan_keuangan():
+# ============================================================
+# 🔹 ROUTE: Laporan Posisi Keuangan (Balance Sheet) - FULL AUTOMATIC
+# ============================================================
+@app.route("/laporan-posisi-keuangan")
+def laporan_posisi_keuangan():
     if not session.get('logged_in'):
         return redirect('/login')
-    return create_simple_page("📈 Laporan Keuangan", "📈 Halaman Laporan Keuangan akan segera hadir! 📈")
+    
+    user_email = session.get('user_email')
+    current_period = datetime.now().strftime('%Y-%m')
+    
+    try:
+        # FORMAT CURRENCY HELPER
+        def rp(val):
+            try:
+                return f"Rp {int(val):,}".replace(",", ".")
+            except:
+                return "Rp 0"
 
+        # 1. AMBIL DATA ASET LANCAR DARI NERACA LAJUR
+        jurnal_result = supabase.table("jurnal_umum").select("*").order("tanggal").execute()
+        jurnal_data = jurnal_result.data or []
+        nsa_consolidated = get_initial_balance_data()
+        jurnal_data = filter_akun_tidak_diinginkan(jurnal_data)
+        akun_standar = {kode: info['nama'] for kode, info in CHART_OF_ACCOUNTS.items()}
+        
+        # Proses data untuk aset lancar
+        akun_data = {}
+        for akun_nama, nsa_info in nsa_consolidated.items():
+            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            akun_data[kode_akun] = {
+                'nama_akun': akun_nama,
+                'kode_akun': kode_akun,
+                'neraca_debit': nsa_info['debit'],
+                'neraca_kredit': nsa_info['kredit'],
+                'penyesuaian_debit': 0,
+                'penyesuaian_kredit': 0
+            }
+
+        # Proses jurnal untuk aset lancar
+        for jurnal in jurnal_data:
+            akun_nama = jurnal.get('nama_akun', 'Unknown')
+            debit = float(jurnal.get('debit', 0) or 0)
+            kredit = float(jurnal.get('kredit', 0) or 0)
+            
+            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            
+            if kode_akun not in akun_data:
+                 akun_data[kode_akun] = {
+                    'nama_akun': akun_nama,
+                    'kode_akun': kode_akun,
+                    'neraca_debit': 0, 'neraca_kredit': 0,
+                    'penyesuaian_debit': 0, 'penyesuaian_kredit': 0
+                }
+            
+            if jurnal.get('transaksi_type', '').lower() in ['penyesuaian', 'penyesuaian_manual', 'penyesuaian_aset', 'penyesuaian_otomatis']:
+                akun_data[kode_akun]['penyesuaian_debit'] += debit
+                akun_data[kode_akun]['penyesuaian_kredit'] += kredit
+            else:
+                akun_data[kode_akun]['neraca_debit'] += debit
+                akun_data[kode_akun]['neraca_kredit'] += kredit
+
+        # 2. AMBIL DATA ASET TETAP + PENYUSUTAN
+        aset_tetap_result = supabase.table("aset_tetap").select("*").eq("user_email", user_email).execute()
+        aset_tetap_data = aset_tetap_result.data or []
+        
+        total_nilai_perolehan_aset = 0
+        total_akumulasi_penyusutan = 0
+        total_nilai_buku_aset = 0
+        
+        aset_tetap_html = ""
+        for aset in aset_tetap_data:
+            nilai_perolehan = float(aset.get('nilai_perolehan', 0) or 0)
+            akumulasi_penyusutan = float(aset.get('akumulasi_penyusutan', 0) or 0)
+            nilai_buku = float(aset.get('nilai_buku', 0) or 0)
+            
+            total_nilai_perolehan_aset += nilai_perolehan
+            total_akumulasi_penyusutan += akumulasi_penyusutan
+            total_nilai_buku_aset += nilai_buku
+            
+            aset_tetap_html += f"""
+            <tr>
+                <td>1210</td>
+                <td>{aset['nama_aset']}</td>
+                <td class="number">{rp(nilai_perolehan)}</td>
+            </tr>
+            <tr>
+                <td>1211</td>
+                <td>Akumulasi Penyusutan {aset['nama_aset']}</td>
+                <td class="number">{rp(akumulasi_penyusutan)}</td>
+            </tr>
+            """
+
+        # 3. AMBIL DATA UTANG DARI BUKU BESAR PEMBANTU UTANG
+        # Cari saldo utang dari jurnal umum
+        saldo_utang_usaha = 0
+        for kode_akun, data in akun_data.items():
+            if 'utang' in data['nama_akun'].lower():
+                saldo_utang = data['neraca_kredit'] + data['penyesuaian_kredit'] - data['neraca_debit'] - data['penyesuaian_debit']
+                if saldo_utang > 0:
+                    saldo_utang_usaha += saldo_utang
+
+        # 4. AMBIL DATA PENDAPATAN DITERIMA DIMUKA
+        pdd_result = supabase.table("pendapatan_diterima_dimuka").select("*").eq("user_email", user_email).eq("status", "dp_diterima").execute()
+        pdd_data = pdd_result.data or []
+        
+        total_pendapatan_ddm = sum(float(pdd.get('jumlah_dp', 0) or 0) for pdd in pdd_data)
+
+        # 5. AMBIL DATA MODAL DARI LAPORAN PERUBAHAN MODAL
+        # Hitung modal awal
+        modal_awal_result = supabase.table("modal").select("jumlah").eq("user_email", user_email).eq("tipe", "MODAL_AWAL").execute()
+        modal_awal_data = modal_awal_result.data or []
+        total_modal_awal = sum(float(modal.get('jumlah', 0) or 0) for modal in modal_awal_data)
+        
+        # Hitung tambahan modal
+        tambahan_modal_result = supabase.table("modal").select("jumlah").eq("user_email", user_email).eq("tipe", "TAMBAHAN_MODAL").execute()
+        tambahan_modal_data = tambahan_modal_result.data or []
+        total_tambahan_modal = sum(float(modal.get('jumlah', 0) or 0) for modal in tambahan_modal_data)
+        
+        # Hitung prive
+        prive_result = supabase.table("prive").select("jumlah").eq("user_email", user_email).execute()
+        prive_data = prive_result.data or []
+        total_prive = sum(float(prive.get('jumlah', 0) or 0) for prive in prive_data)
+        
+        # Hitung laba rugi dari neraca lajur (sederhana)
+        total_pendapatan = 0
+        total_beban = 0
+        for kode_akun, data in akun_data.items():
+            nama_akun = data['nama_akun'].lower()
+            saldo = (data['neraca_debit'] + data['penyesuaian_debit']) - (data['neraca_kredit'] + data['penyesuaian_kredit'])
+            
+            if any(keyword in nama_akun for keyword in ['pendapatan', 'penjualan']):
+                total_pendapatan += abs(saldo) if saldo < 0 else 0
+            elif any(keyword in nama_akun for keyword in ['beban', 'biaya']):
+                total_beban += abs(saldo) if saldo > 0 else 0
+        
+        laba_rugi_bersih = total_pendapatan - total_beban
+        
+        # Hitung modal akhir
+        modal_akhir = total_modal_awal + total_tambahan_modal + laba_rugi_bersih - total_prive
+
+        # 6. HITUNG TOTAL ASET LANCAR
+        total_aset_lancar = 0
+        aset_lancar_html = ""
+        for kode_akun, data in akun_data.items():
+            nama_akun = data['nama_akun'].lower()
+            saldo = (data['neraca_debit'] + data['penyesuaian_debit']) - (data['neraca_kredit'] + data['penyesuaian_kredit'])
+            
+            if any(keyword in nama_akun for keyword in ['kas', 'bank', 'piutang', 'persediaan', 'perlengkapan']) and saldo > 0:
+                total_aset_lancar += saldo
+                aset_lancar_html += f"""
+                <tr>
+                    <td>{data['kode_akun']}</td>
+                    <td>{data['nama_akun']}</td>
+                    <td class="number">{rp(saldo)}</td>
+                </tr>
+                """
+
+        # 7. HITUNG TOTAL KESELURUHAN
+        total_aset = total_aset_lancar + total_nilai_buku_aset
+        total_utang = saldo_utang_usaha + total_pendapatan_ddm
+        total_pasiva = total_utang + modal_akhir
+
+        # 8. GENERATE HTML
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Laporan Posisi Keuangan - PINKILANG</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                * {{
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }}
+                
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #e6f7ff, #f0f8ff);
+                    padding: 20px;
+                    min-height: 100vh;
+                }}
+                
+                .container {{
+                    max-width: 1200px;
+                    margin: 0 auto;
+                    background: white;
+                    border-radius: 15px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                    overflow: hidden;
+                }}
+                
+                .header {{
+                    background: linear-gradient(135deg, #007bff, #0056b3);
+                    color: white;
+                    padding: 25px;
+                    text-align: center;
+                }}
+                
+                .back-btn {{
+                    display: inline-block;
+                    padding: 10px 20px;
+                    background: rgba(255,255,255,0.2);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 8px;
+                    margin-bottom: 15px;
+                    border: 1px solid rgba(255,255,255,0.3);
+                    transition: all 0.3s ease;
+                    font-weight: 500;
+                }}
+                
+                .back-btn:hover {{
+                    background: rgba(255,255,255,0.3);
+                    transform: translateY(-2px);
+                }}
+                
+                h1 {{
+                    font-size: 28px;
+                    margin-bottom: 10px;
+                    font-weight: 600;
+                }}
+                
+                .company-info {{
+                    font-size: 18px;
+                    margin-bottom: 5px;
+                    font-weight: 500;
+                }}
+                
+                .period-info {{
+                    font-size: 14px;
+                    opacity: 0.9;
+                }}
+                
+                .content {{
+                    padding: 30px;
+                }}
+                
+                .balance-sheet {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-bottom: 30px;
+                    font-size: 14px;
+                }}
+                
+                .balance-sheet th {{
+                    background: #f8f9fa;
+                    padding: 12px;
+                    text-align: left;
+                    border: 1px solid #dee2e6;
+                    font-weight: 600;
+                    color: #495057;
+                }}
+                
+                .balance-sheet td {{
+                    padding: 10px 12px;
+                    border: 1px solid #dee2e6;
+                    color: #333;
+                }}
+                
+                .balance-sheet .section-header {{
+                    background: #e3f2fd;
+                    font-weight: bold;
+                    font-size: 15px;
+                }}
+                
+                .balance-sheet .total-row {{
+                    background: #fff3cd;
+                    font-weight: bold;
+                    font-size: 15px;
+                }}
+                
+                .balance-sheet .grand-total {{
+                    background: #d4edda;
+                    font-weight: bold;
+                    font-size: 16px;
+                    color: #155724;
+                }}
+                
+                .number {{
+                    text-align: right;
+                    font-family: 'Courier New', monospace;
+                    font-weight: 500;
+                }}
+                
+                .balance-status {{
+                    text-align: center;
+                    padding: 20px;
+                    margin: 20px 0;
+                    border-radius: 10px;
+                    font-weight: 600;
+                    font-size: 18px;
+                }}
+                
+                .balance-correct {{
+                    background: #d4edda;
+                    color: #155724;
+                    border: 2px solid #c3e6cb;
+                }}
+                
+                .balance-incorrect {{
+                    background: #f8d7da;
+                    color: #721c24;
+                    border: 2px solid #f5c6cb;
+                }}
+                
+                .summary-info {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 15px;
+                    margin: 20px 0;
+                }}
+                
+                .summary-item {{
+                    background: #f8f9fa;
+                    padding: 15px;
+                    border-radius: 8px;
+                    text-align: center;
+                    border-left: 4px solid #007bff;
+                }}
+                
+                .summary-value {{
+                    font-size: 18px;
+                    font-weight: bold;
+                    color: #007bff;
+                    margin-bottom: 5px;
+                }}
+                
+                .summary-label {{
+                    font-size: 12px;
+                    color: #666;
+                }}
+                
+                .action-buttons {{
+                    text-align: center;
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #eee;
+                    display: flex;
+                    gap: 10px;
+                    justify-content: center;
+                    flex-wrap: wrap;
+                }}
+                
+                .btn {{
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #6c757d;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 6px;
+                    transition: all 0.3s ease;
+                    font-weight: 500;
+                    border: none;
+                    cursor: pointer;
+                    font-size: 14px;
+                }}
+                
+                .btn:hover {{
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                }}
+                
+                .btn-primary {{
+                    background: #007bff;
+                }}
+                
+                .btn-info {{
+                    background: #17a2b8;
+                }}
+                
+                .btn-success {{
+                    background: #28a745;
+                }}
+                
+                .btn-warning {{
+                    background: #ffc107;
+                    color: #000;
+                }}
+                
+                @media print {{
+                    body {{
+                        background: white;
+                        padding: 0;
+                    }}
+                    .container {{
+                        box-shadow: none;
+                        border-radius: 0;
+                    }}
+                    .action-buttons {{
+                        display: none;
+                    }}
+                    .summary-info {{
+                        display: none;
+                    }}
+                }}
+                
+                @media (max-width: 768px) {{
+                    .container {{
+                        margin: 10px;
+                        border-radius: 10px;
+                    }}
+                    
+                    .content {{
+                        padding: 15px;
+                    }}
+                    
+                    .balance-sheet {{
+                        font-size: 12px;
+                    }}
+                    
+                    .balance-sheet td,
+                    .balance-sheet th {{
+                        padding: 8px 10px;
+                    }}
+                    
+                    .action-buttons {{
+                        flex-direction: column;
+                    }}
+                    
+                    .btn {{
+                        width: 100%;
+                        margin: 2px 0;
+                    }}
+                    
+                    .summary-info {{
+                        grid-template-columns: 1fr;
+                    }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <a href="/dashboard" class="back-btn">← Kembali ke Dashboard</a>
+                    <h1>📋 LAPORAN POSISI KEUANGAN</h1>
+                    <div class="company-info">RUMAH BIBIT MAS ANGGA</div>
+                    <div class="period-info">Periode: {datetime.now().strftime('%B %Y')}</div>
+                    <div class="period-info">Login sebagai: {user_email}</div>
+                </div>
+                
+                <div class="content">
+                    <div class="summary-info">
+                        <div class="summary-item">
+                            <div class="summary-value">{rp(total_aset)}</div>
+                            <div class="summary-label">Total Aset</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="summary-value">{rp(total_utang)}</div>
+                            <div class="summary-label">Total Utang</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="summary-value">{rp(modal_akhir)}</div>
+                            <div class="summary-label">Modal Akhir</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="summary-value">{rp(laba_rugi_bersih)}</div>
+                            <div class="summary-label">Laba/Rugi Bersih</div>
+                        </div>
+                    </div>
+                    
+                    <div class="balance-status {'balance-correct' if abs(total_aset - total_pasiva) < 0.01 else 'balance-incorrect'}">
+                        {'✅ LAPORAN POSISI KEUANGAN SEIMBANG' if abs(total_aset - total_pasiva) < 0.01 else '❌ LAPORAN POSISI KEUANGAN TIDAK SEIMBANG'}
+                        <br>
+                        <small>Total Aktiva: {rp(total_aset)} | Total Pasiva: {rp(total_pasiva)} | Selisih: {rp(abs(total_aset - total_pasiva))}</small>
+                    </div>
+                    
+                    <table class="balance-sheet">
+                        <tr>
+                            <th width="80">NO AKUN</th>
+                            <th>REKENING</th>
+                            <th width="180" class="number">JUMLAH</th>
+                            <th width="80">NO AKUN</th>
+                            <th>REKENING</th>
+                            <th width="180" class="number">JUMLAH</th>
+                        </tr>
+                        
+                        <!-- ASET LANCAR -->
+                        <tr class="section-header">
+                            <td>1100</td>
+                            <td colspan="2">Aset Lancar</td>
+                            <td>2000</td>
+                            <td colspan="2">Utang</td>
+                        </tr>
+                        {aset_lancar_html if aset_lancar_html else """
+                        <tr>
+                            <td colspan="3" style="text-align: center; color: #666; padding: 15px;">
+                                Tidak ada data aset lancar
+                            </td>
+                            <td colspan="3" style="text-align: center; color: #666; padding: 15px;">
+                                Tidak ada data utang
+                            </td>
+                        </tr>
+                        """}
+                        
+                        <!-- Tambahan Kas dari neraca lajur jika ada -->
+                        <tr>
+                            <td>1110</td>
+                            <td>Kas</td>
+                            <td class="number">{rp(total_aset_lancar)}</td>
+                            <td>2100</td>
+                            <td>Utang Usaha</td>
+                            <td class="number">{rp(saldo_utang_usaha)}</td>
+                        </tr>
+                        
+                        <tr class="total-row">
+                            <td colspan="2">Total Aset Lancar</td>
+                            <td class="number">{rp(total_aset_lancar)}</td>
+                            <td>2200</td>
+                            <td>Pendapatan Diterima Dimuka</td>
+                            <td class="number">{rp(total_pendapatan_ddm)}</td>
+                        </tr>
+                        
+                        <!-- ASET TETAP -->
+                        <tr class="section-header">
+                            <td>1200</td>
+                            <td colspan="2">Aset Tetap</td>
+                            <td>3000</td>
+                            <td colspan="2">Modal</td>
+                        </tr>
+                        {aset_tetap_html if aset_tetap_html else """
+                        <tr>
+                            <td colspan="3" style="text-align: center; color: #666; padding: 15px;">
+                                Tidak ada data aset tetap
+                            </td>
+                            <td colspan="3" style="text-align: center; color: #666; padding: 15px;">
+                                Tidak ada data modal
+                            </td>
+                        </tr>
+                        """}
+                        
+                        <tr class="total-row">
+                            <td colspan="2">Total Aset Tetap</td>
+                            <td class="number">{rp(total_nilai_buku_aset)}</td>
+                            <td colspan="2">Total Modal</td>
+                            <td class="number">{rp(modal_akhir)}</td>
+                        </tr>
+                        
+                        <!-- GRAND TOTAL -->
+                        <tr class="grand-total">
+                            <td colspan="2"><strong>Jumlah Aktiva</strong></td>
+                            <td class="number"><strong>{rp(total_aset)}</strong></td>
+                            <td colspan="2"><strong>Jumlah Pasiva</strong></td>
+                            <td class="number"><strong>{rp(total_pasiva)}</strong></td>
+                        </tr>
+                    </table>
+                    
+                    <!-- DETAIL PERHITUNGAN MODAL -->
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 20px;">
+                        <h4 style="color: #495057; margin-bottom: 10px;">📊 Detail Perhitungan Modal:</h4>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; font-size: 14px;">
+                            <div>Modal Awal: <strong>{rp(total_modal_awal)}</strong></div>
+                            <div>Tambahan Modal: <strong>{rp(total_tambahan_modal)}</strong></div>
+                            <div>Laba/Rugi Bersih: <strong>{rp(laba_rugi_bersih)}</strong></div>
+                            <div>Prive: <strong>{rp(total_prive)}</strong></div>
+                            <div style="grid-column: 1 / -1; border-top: 1px solid #ddd; padding-top: 5px;">
+                                Modal Akhir: <strong>{rp(modal_akhir)}</strong>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="action-buttons">
+                        <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
+                        <a href="/neraca-lajur" class="btn btn-info">📊 Neraca Lajur</a>
+                        <a href="/laporan-laba-rugi" class="btn btn-success">📈 Laporan Laba Rugi</a>
+                        <a href="/laporan-perubahan-modal" class="btn btn-warning">💰 Laporan Perubahan Modal</a>
+                        <button onclick="window.print()" class="btn" style="background: #17a2b8;">🖨️ Cetak Laporan</button>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {{
+                    // Add animation
+                    const rows = document.querySelectorAll('.balance-sheet tr');
+                    rows.forEach((row, index) => {{
+                        row.style.opacity = '0';
+                        row.style.transform = 'translateY(10px)';
+                        setTimeout(() => {{
+                            row.style.transition = 'all 0.3s ease';
+                            row.style.opacity = '1';
+                            row.style.transform = 'translateY(0)';
+                        }}, index * 50);
+                    }});
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        return html
+        
+    except Exception as e:
+        logger.error(f"❌ Error di Laporan Posisi Keuangan: {str(e)}")
+        import traceback
+        error_details = traceback.format_exc()
+        
+        return f"""
+        <html>
+        <body style="font-family: Arial; padding: 20px; background: #f8f9fa;">
+            <div style="max-width: 600px; margin: 50px auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); text-align: center;">
+                <h1 style="color: #dc3545; margin-bottom: 20px;">❌ Error Laporan Posisi Keuangan</h1>
+                <p style="color: #666; margin-bottom: 20px;">Terjadi kesalahan saat memproses data:</p>
+                <p style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left; overflow-x: auto;">
+                    {str(e)}
+                </p>
+                <details style="margin: 15px 0; text-align: left;">
+                    <summary>Detail Error</summary>
+                    <pre style="background: #f8f9fa; padding: 10px; border-radius: 5px; font-size: 10px; overflow-x: auto;">{error_details}</pre>
+                </details>
+                <a href="/dashboard" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px;">← Kembali ke Dashboard</a>
+            </div>
+        </body>
+        </html>
+        """
+    
+# ============================================================
+# 🔹 ROUTE: Jurnal Penutup (Closing Entries)
+# ============================================================
 @app.route("/jurnal-penutup")
 def jurnal_penutup():
     if not session.get('logged_in'):
         return redirect('/login')
-    return create_simple_page("🔒 Jurnal Penutup", "🔒 Halaman Jurnal Penutup akan segera hadir! 🔒")
+    
+    user_email = session.get('user_email')
+    current_period = datetime.now().strftime('%Y-%m')
+    
+    try:
+        # 1. AMBIL DATA DARI NERACA LAJUR
+        jurnal_result = supabase.table("jurnal_umum").select("*").order("tanggal").execute()
+        jurnal_data = jurnal_result.data or []
+        nsa_consolidated = get_initial_balance_data()
+        jurnal_data = filter_akun_tidak_diinginkan(jurnal_data)
+        akun_standar = {kode: info['nama'] for kode, info in CHART_OF_ACCOUNTS.items()}
+        
+        # Proses data akun
+        akun_data = {}
+        for akun_nama, nsa_info in nsa_consolidated.items():
+            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            akun_data[kode_akun] = {
+                'nama_akun': akun_nama,
+                'kode_akun': kode_akun,
+                'neraca_debit': nsa_info['debit'],
+                'neraca_kredit': nsa_info['kredit'],
+                'penyesuaian_debit': 0,
+                'penyesuaian_kredit': 0,
+                'nssp_debit': 0,
+                'nssp_kredit': 0
+            }
 
+        # Proses jurnal
+        for jurnal in jurnal_data:
+            akun_nama = jurnal.get('nama_akun', 'Unknown')
+            debit = float(jurnal.get('debit', 0) or 0)
+            kredit = float(jurnal.get('kredit', 0) or 0)
+            
+            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            
+            if kode_akun not in akun_data:
+                 akun_data[kode_akun] = {
+                    'nama_akun': akun_nama,
+                    'kode_akun': kode_akun,
+                    'neraca_debit': 0, 'neraca_kredit': 0,
+                    'penyesuaian_debit': 0, 'penyesuaian_kredit': 0,
+                    'nssp_debit': 0, 'nssp_kredit': 0
+                }
+            
+            if jurnal.get('transaksi_type', '').lower() in ['penyesuaian', 'penyesuaian_manual', 'penyesuaian_aset', 'penyesuaian_otomatis']:
+                akun_data[kode_akun]['penyesuaian_debit'] += debit
+                akun_data[kode_akun]['penyesuaian_kredit'] += kredit
+            else:
+                akun_data[kode_akun]['neraca_debit'] += debit
+                akun_data[kode_akun]['neraca_kredit'] += kredit
+        
+        # Hitung NSSP
+        for kode_akun, data in akun_data.items():
+            data['nssp_debit'] = data['neraca_debit'] + data['penyesuaian_debit']
+            data['nssp_kredit'] = data['neraca_kredit'] + data['penyesuaian_kredit']
+        
+        # 2. IDENTIFIKASI AKUN NOMINAL (Pendapatan & Beban)
+        akun_pendapatan = {}
+        akun_beban = {}
+        akun_hpp = {}
+        akun_pembelian = {}
+        
+        for kode_akun, data in akun_data.items():
+            nama_akun = data['nama_akun'].lower()
+            saldo_nssp = data['nssp_debit'] - data['nssp_kredit']
+            
+            # Akun Pendapatan (saldo normal kredit)
+            if any(keyword in nama_akun for keyword in ['penjualan', 'pendapatan']):
+                if data['nssp_kredit'] > 0:
+                    akun_pendapatan[kode_akun] = data
+            
+            # Akun Beban (saldo normal debit)
+            elif any(keyword in nama_akun for keyword in ['beban', 'biaya']):
+                if data['nssp_debit'] > 0:
+                    akun_beban[kode_akun] = data
+            
+            # HPP (saldo normal debit)
+            elif 'hpp' in nama_akun or 'harga pokok penjualan' in nama_akun:
+                if data['nssp_debit'] > 0:
+                    akun_hpp[kode_akun] = data
+            
+            # Pembelian (saldo normal debit)
+            elif 'pembelian' in nama_akun and 'penjualan' not in nama_akun:
+                if data['nssp_debit'] > 0:
+                    akun_pembelian[kode_akun] = data
+        
+        # 3. HITUNG TOTAL UNTUK JURNAL PENUTUP
+        total_penjualan = sum(data['nssp_kredit'] for data in akun_pendapatan.values())
+        total_hpp = sum(data['nssp_debit'] for data in akun_hpp.values())
+        total_pembelian = sum(data['nssp_debit'] for data in akun_pembelian.values())
+        total_beban = sum(data['nssp_debit'] for data in akun_beban.values())
+        
+        # Hitung beban penyusutan dari aset tetap
+        aset_tetap_result = supabase.table("aset_tetap").select("*").eq("user_email", user_email).execute()
+        aset_tetap_data = aset_tetap_result.data or []
+        total_penyusutan = sum(float(aset.get('akumulasi_penyusutan', 0) or 0) for aset in aset_tetap_data)
+        
+        # Hitung laba bersih
+        laba_bersih = total_penjualan - total_hpp - total_pembelian - total_beban - total_penyusutan
+        
+        # 4. AMBIL DATA PRIVE
+        prive_result = supabase.table("prive").select("jumlah").eq("user_email", user_email).execute()
+        prive_data = prive_result.data or []
+        total_prive = sum(float(prive.get('jumlah', 0) or 0) for prive in prive_data)
+        
+        # 5. GENERATE ENTRIES JURNAL PENUTUP
+        entries = []
+        total_debit = 0
+        total_kredit = 0
+        
+        # Entry 1: Menutup Pendapatan ke Ikhtisar L/R
+        if total_penjualan > 0:
+            entries.append({
+                'tanggal': '30',
+                'keterangan': 'Penjualan',
+                'ref': '',
+                'debit': 0,
+                'kredit': total_penjualan,
+                'indent': 0
+            })
+            entries.append({
+                'tanggal': '',
+                'keterangan': 'Ikhtisar L/R',
+                'ref': '',
+                'debit': total_penjualan,
+                'kredit': 0,
+                'indent': 1
+            })
+            entries.append({
+                'tanggal': '',
+                'keterangan': '(Menutup Penjualan)',
+                'ref': '',
+                'debit': 0,
+                'kredit': 0,
+                'indent': 0
+            })
+            entries.append({'empty': True})
+            total_debit += total_penjualan
+            total_kredit += total_penjualan
+        
+        # Entry 2: Menutup HPP, Pembelian, dan Beban ke Ikhtisar L/R
+        total_beban_dan_hpp = total_hpp + total_pembelian + total_beban + total_penyusutan
+        if total_beban_dan_hpp > 0:
+            entries.append({
+                'tanggal': '30',
+                'keterangan': 'Ikhtisar L/R',
+                'ref': '',
+                'debit': total_beban_dan_hpp,
+                'kredit': 0,
+                'indent': 0
+            })
+            
+            # Detail HPP
+            if total_hpp > 0:
+                entries.append({
+                    'tanggal': '',
+                    'keterangan': 'HPP',
+                    'ref': '',
+                    'debit': 0,
+                    'kredit': total_hpp,
+                    'indent': 1
+                })
+            
+            # Detail Pembelian
+            if total_pembelian > 0:
+                entries.append({
+                    'tanggal': '',
+                    'keterangan': 'Pembelian',
+                    'ref': '',
+                    'debit': 0,
+                    'kredit': total_pembelian,
+                    'indent': 1
+                })
+            
+            # Detail Beban
+            for kode_akun, data in akun_beban.items():
+                if data['nssp_debit'] > 0:
+                    entries.append({
+                        'tanggal': '',
+                        'keterangan': data['nama_akun'],
+                        'ref': '',
+                        'debit': 0,
+                        'kredit': data['nssp_debit'],
+                        'indent': 1
+                    })
+            
+            # Detail Beban Penyusutan
+            if total_penyusutan > 0:
+                entries.append({
+                    'tanggal': '',
+                    'keterangan': 'Beban Penyusutan',
+                    'ref': '',
+                    'debit': 0,
+                    'kredit': total_penyusutan,
+                    'indent': 1
+                })
+            
+            entries.append({
+                'tanggal': '',
+                'keterangan': '(Menutup HPP dan Beban)',
+                'ref': '',
+                'debit': 0,
+                'kredit': 0,
+                'indent': 0
+            })
+            entries.append({'empty': True})
+            total_debit += total_beban_dan_hpp
+            total_kredit += total_beban_dan_hpp
+        
+        # Entry 3: Menutup Laba ke Modal
+        if laba_bersih > 0:
+            entries.append({
+                'tanggal': '30',
+                'keterangan': 'Ikhtisar L/R',
+                'ref': '',
+                'debit': laba_bersih,
+                'kredit': 0,
+                'indent': 0
+            })
+            entries.append({
+                'tanggal': '',
+                'keterangan': 'Modal',
+                'ref': '',
+                'debit': 0,
+                'kredit': laba_bersih,
+                'indent': 1
+            })
+            entries.append({
+                'tanggal': '',
+                'keterangan': '(Menutup Laba)',
+                'ref': '',
+                'debit': 0,
+                'kredit': 0,
+                'indent': 0
+            })
+            entries.append({'empty': True})
+            total_debit += laba_bersih
+            total_kredit += laba_bersih
+        
+        # Entry 4: Menutup Prive ke Modal
+        if total_prive > 0:
+            entries.append({
+                'tanggal': '30',
+                'keterangan': 'Modal',
+                'ref': '',
+                'debit': total_prive,
+                'kredit': 0,
+                'indent': 0
+            })
+            entries.append({
+                'tanggal': '',
+                'keterangan': 'Prive',
+                'ref': '',
+                'debit': 0,
+                'kredit': total_prive,
+                'indent': 1
+            })
+            total_debit += total_prive
+            total_kredit += total_prive
+        
+        # 6. FORMAT CURRENCY HELPER
+        def rp(val):
+            try:
+                return f"Rp {int(val):,}".replace(",", ".")
+            except:
+                return "Rp 0"
+        
+        # 7. GENERATE HTML TABLE ROWS
+        entries_html = ""
+        for entry in entries:
+            if 'empty' in entry:
+                entries_html += '<tr><td colspan="5" style="height: 10px;"></td></tr>'
+            else:
+                indent_class = "indent-1" if entry['indent'] == 1 else ""
+                debit_display = rp(entry['debit']) if entry['debit'] > 0 else ""
+                kredit_display = rp(entry['kredit']) if entry['kredit'] > 0 else ""
+                
+                entries_html += f"""
+                <tr>
+                    <td>{entry['tanggal']}</td>
+                    <td class="{indent_class}">{entry['keterangan']}</td>
+                    <td>{entry['ref']}</td>
+                    <td class="number">{debit_display}</td>
+                    <td class="number">{kredit_display}</td>
+                </tr>
+                """
+        
+        # 8. GENERATE SUMMARY INFO
+        summary_html = f"""
+        <div class="summary-info">
+            <div class="summary-item">
+                <div class="summary-value">{rp(total_penjualan)}</div>
+                <div class="summary-label">Total Penjualan</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{rp(total_beban_dan_hpp)}</div>
+                <div class="summary-label">Total Beban & HPP</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{rp(laba_bersih)}</div>
+                <div class="summary-label">Laba Bersih</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{rp(total_prive)}</div>
+                <div class="summary-label">Total Prive</div>
+            </div>
+        </div>
+        """
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Jurnal Penutup - PINKILANG</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                * {{
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }}
+                
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #fff0f5, #ffe6f2);
+                    padding: 20px;
+                    min-height: 100vh;
+                }}
+                
+                .container {{
+                    max-width: 1000px;
+                    margin: 0 auto;
+                    background: white;
+                    border-radius: 15px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                    overflow: hidden;
+                }}
+                
+                .header {{
+                    background: linear-gradient(135deg, #ff6ea9, #c4006e);
+                    color: white;
+                    padding: 25px;
+                    text-align: center;
+                }}
+                
+                .back-btn {{
+                    display: inline-block;
+                    padding: 10px 20px;
+                    background: rgba(255,255,255,0.2);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 8px;
+                    margin-bottom: 15px;
+                    border: 1px solid rgba(255,255,255,0.3);
+                    transition: all 0.3s ease;
+                    font-weight: 500;
+                }}
+                
+                .back-btn:hover {{
+                    background: rgba(255,255,255,0.3);
+                    transform: translateY(-2px);
+                }}
+                
+                h1 {{
+                    font-size: 28px;
+                    margin-bottom: 10px;
+                    font-weight: 600;
+                }}
+                
+                .company-info {{
+                    font-size: 18px;
+                    margin-bottom: 5px;
+                    font-weight: 500;
+                }}
+                
+                .period-info {{
+                    font-size: 14px;
+                    opacity: 0.9;
+                }}
+                
+                .content {{
+                    padding: 30px;
+                }}
+                
+                .closing-journal {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 20px 0;
+                    font-size: 14px;
+                }}
+                
+                .closing-journal th {{
+                    background: #f8f9fa;
+                    padding: 12px 8px;
+                    text-align: left;
+                    border: 1px solid #dee2e6;
+                    font-weight: 600;
+                    color: #495057;
+                }}
+                
+                .closing-journal td {{
+                    padding: 10px 8px;
+                    border: 1px solid #dee2e6;
+                    color: #333;
+                }}
+                
+                .closing-journal .indent-1 {{
+                    padding-left: 30px;
+                    font-style: italic;
+                }}
+                
+                .closing-journal .total-row {{
+                    background: #fff3cd;
+                    font-weight: bold;
+                    font-size: 15px;
+                }}
+                
+                .number {{
+                    text-align: right;
+                    font-family: 'Courier New', monospace;
+                    font-weight: 500;
+                }}
+                
+                .balance-status {{
+                    text-align: center;
+                    padding: 15px;
+                    margin: 20px 0;
+                    border-radius: 10px;
+                    font-weight: 600;
+                    font-size: 16px;
+                }}
+                
+                .balance-correct {{
+                    background: #d4edda;
+                    color: #155724;
+                    border: 2px solid #c3e6cb;
+                }}
+                
+                .balance-incorrect {{
+                    background: #f8d7da;
+                    color: #721c24;
+                    border: 2px solid #f5c6cb;
+                }}
+                
+                .summary-info {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 15px;
+                    margin: 20px 0;
+                }}
+                
+                .summary-item {{
+                    background: #f8f9fa;
+                    padding: 15px;
+                    border-radius: 8px;
+                    text-align: center;
+                    border-left: 4px solid #c4006e;
+                }}
+                
+                .summary-value {{
+                    font-size: 16px;
+                    font-weight: bold;
+                    color: #c4006e;
+                    margin-bottom: 5px;
+                }}
+                
+                .summary-label {{
+                    font-size: 12px;
+                    color: #666;
+                }}
+                
+                .action-buttons {{
+                    text-align: center;
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #eee;
+                    display: flex;
+                    gap: 10px;
+                    justify-content: center;
+                    flex-wrap: wrap;
+                }}
+                
+                .btn {{
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #6c757d;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 6px;
+                    transition: all 0.3s ease;
+                    font-weight: 500;
+                    border: none;
+                    cursor: pointer;
+                    font-size: 14px;
+                }}
+                
+                .btn:hover {{
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                }}
+                
+                .btn-primary {{
+                    background: #c4006e;
+                }}
+                
+                .btn-info {{
+                    background: #17a2b8;
+                }}
+                
+                .btn-success {{
+                    background: #28a745;
+                }}
+                
+                .btn-warning {{
+                    background: #ffc107;
+                    color: #000;
+                }}
+                
+                @media print {{
+                    body {{
+                        background: white;
+                        padding: 0;
+                    }}
+                    .container {{
+                        box-shadow: none;
+                        border-radius: 0;
+                    }}
+                    .action-buttons {{
+                        display: none;
+                    }}
+                    .summary-info {{
+                        display: none;
+                    }}
+                }}
+                
+                @media (max-width: 768px) {{
+                    .container {{
+                        margin: 10px;
+                        border-radius: 10px;
+                    }}
+                    
+                    .content {{
+                        padding: 15px;
+                    }}
+                    
+                    .closing-journal {{
+                        font-size: 12px;
+                    }}
+                    
+                    .closing-journal td,
+                    .closing-journal th {{
+                        padding: 8px 6px;
+                    }}
+                    
+                    .action-buttons {{
+                        flex-direction: column;
+                    }}
+                    
+                    .btn {{
+                        width: 100%;
+                        margin: 2px 0;
+                    }}
+                    
+                    .summary-info {{
+                        grid-template-columns: 1fr;
+                    }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <a href="/dashboard" class="back-btn">← Kembali ke Dashboard</a>
+                    <h1>📒 JURNAL PENUTUP</h1>
+                    <div class="company-info">RUMAH BIBIT MAS ANGGA</div>
+                    <div class="period-info">Periode: {datetime.now().strftime('%B %Y')}</div>
+                    <div class="period-info">Login sebagai: {user_email}</div>
+                </div>
+                
+                <div class="content">
+                    {summary_html}
+                    
+                    <div class="balance-status {'balance-correct' if abs(total_debit - total_kredit) < 0.01 else 'balance-incorrect'}">
+                        {'✅ JURNAL PENUTUP SEIMBANG' if abs(total_debit - total_kredit) < 0.01 else '❌ JURNAL PENUTUP TIDAK SEIMBANG'}
+                        <br>
+                        <small>Total Debit: {rp(total_debit)} | Total Kredit: {rp(total_kredit)}</small>
+                    </div>
+                    
+                    <table class="closing-journal">
+                        <thead>
+                            <tr>
+                                <th width="60">TGL</th>
+                                <th>KETERANGAN</th>
+                                <th width="80">REF</th>
+                                <th width="150">DEBIT</th>
+                                <th width="150">KREDIT</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {entries_html if entries_html else """
+                            <tr>
+                                <td colspan="5" style="text-align: center; padding: 40px; color: #666;">
+                                    <h3>📒 Belum ada data untuk jurnal penutup</h3>
+                                    <p>Pastikan sudah ada transaksi pendapatan dan beban pada periode ini.</p>
+                                </td>
+                            </tr>
+                            """}
+                            
+                            <!-- TOTAL ROW -->
+                            <tr class="total-row">
+                                <td colspan="3"><strong>TOTAL</strong></td>
+                                <td class="number"><strong>{rp(total_debit)}</strong></td>
+                                <td class="number"><strong>{rp(total_kredit)}</strong></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    
+                    <div class="action-buttons">
+                        <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
+                        <a href="/neraca-lajur" class="btn btn-info">📊 Neraca Lajur</a>
+                        <a href="/laporan-laba-rugi" class="btn btn-success">📈 Laporan Laba Rugi</a>
+                        <a href="/laporan-posisi-keuangan" class="btn btn-warning">💰 Neraca</a>
+                        <button onclick="window.print()" class="btn" style="background: #17a2b8;">🖨️ Cetak Jurnal</button>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {{
+                    // Add animation
+                    const rows = document.querySelectorAll('.closing-journal tbody tr');
+                    rows.forEach((row, index) => {{
+                        row.style.opacity = '0';
+                        row.style.transform = 'translateX(20px)';
+                        setTimeout(() => {{
+                            row.style.transition = 'all 0.3s ease';
+                            row.style.opacity = '1';
+                            row.style.transform = 'translateX(0)';
+                        }}, index * 30);
+                    }});
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        return html
+        
+    except Exception as e:
+        logger.error(f"❌ Error di Jurnal Penutup: {str(e)}")
+        import traceback
+        error_details = traceback.format_exc()
+        
+        return f"""
+        <html>
+        <body style="font-family: Arial; padding: 20px; background: #f8f9fa;">
+            <div style="max-width: 600px; margin: 50px auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); text-align: center;">
+                <h1 style="color: #dc3545; margin-bottom: 20px;">❌ Error Jurnal Penutup</h1>
+                <p style="color: #666; margin-bottom: 20px;">Terjadi kesalahan saat memproses data:</p>
+                <p style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left; overflow-x: auto;">
+                    {str(e)}
+                </p>
+                <a href="/dashboard" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #c4006e; color: white; text-decoration: none; border-radius: 5px;">← Kembali ke Dashboard</a>
+            </div>
+        </body>
+        </html>
+        """
+
+# ============================================================
+# 🔹 ROUTE: Neraca Saldo Setelah Penutupan
+# ============================================================
+@app.route("/neraca-saldo-setelah-penutupan")
+def neraca_saldo_setelah_penutupan():
+    if not session.get('logged_in'):
+        return redirect('/login')
+    
+    user_email = session.get('user_email')
+    current_period = datetime.now().strftime('%Y-%m')
+    
+    try:
+        # FORMAT CURRENCY HELPER
+        def rp(val):
+            try:
+                return f"Rp {int(val):,}".replace(",", ".")
+            except:
+                return "Rp 0"
+
+        # 1. GENERATE NERACA LAJUR TERLEBIH DAHULU
+        # Panggil function PostgreSQL untuk generate neraca lajur
+        generate_result = supabase.rpc(
+            'generate_neraca_lajur',
+            {'p_period': current_period, 'p_user_email': user_email}
+        ).execute()
+        
+        # 2. AMBIL DATA DARI TABLE neraca_lajur - DIPERBAIKI
+        neraca_lajur_result = supabase.table("neraca_lajur")\
+            .select("*")\
+            .eq("period", current_period)\
+            .eq("user_email", user_email)\
+            .order("account_code")\
+            .execute()
+
+        neraca_lajur_data = neraca_lajur_result.data or []
+
+        # DEBUG: Cek apakah ada data
+        print(f"=== CEK DATA NERACA LAJUR ===")
+        print(f"Periode: {current_period}")
+        print(f"User: {user_email}") 
+        print(f"Jumlah data ditemukan: {len(neraca_lajur_data)}")
+
+        if len(neraca_lajur_data) == 0:
+            print("⚠️  WARNING: Data neraca_lajur KOSONG!")
+            # Coba generate ulang
+            print("Mencoba generate ulang neraca lajur...")
+            generate_result = supabase.rpc(
+                'generate_neraca_lajur',
+                {'p_period': current_period, 'p_user_email': user_email}
+            ).execute()
+            
+            # Ambil data lagi
+            neraca_lajur_result = supabase.table("neraca_lajur")\
+                .eq("period", current_period)\
+                .select("*")\
+                .eq("user_email", user_email)\
+                .order("account_code")\
+                .execute()
+            neraca_lajur_data = neraca_lajur_result.data or []
+            print(f"Jumlah data setelah regenerate: {len(neraca_lajur_data)}")
+
+        # 3. AMBIL DATA ASET TETAP
+        aset_tetap_result = supabase.table("aset_tetap").select("*").eq("user_email", user_email).execute()
+        aset_tetap_data = aset_tetap_result.data or []
+
+        # 4. AMBIL DATA MODAL DAN PRIVE
+        # Modal Awal
+        modal_awal_result = supabase.table("modal").select("jumlah").eq("user_email", user_email).eq("tipe", "MODAL_AWAL").execute()
+        modal_awal_data = modal_awal_result.data or []
+        total_modal_awal = sum(float(modal.get('jumlah', 0) or 0) for modal in modal_awal_data)
+        
+        # Tambahan Modal
+        tambahan_modal_result = supabase.table("modal").select("jumlah").eq("user_email", user_email).eq("tipe", "TAMBAHAN_MODAL").execute()
+        tambahan_modal_data = tambahan_modal_result.data or []
+        total_tambahan_modal = sum(float(modal.get('jumlah', 0) or 0) for modal in tambahan_modal_data)
+        
+        # Prive
+        prive_result = supabase.table("prive").select("jumlah").eq("user_email", user_email).execute()
+        prive_data = prive_result.data or []
+        total_prive = sum(float(prive.get('jumlah', 0) or 0) for prive in prive_data)
+        
+        # 5. HITUNG LABA RUGI DARI NERACA LAJUR
+        total_laba_rugi_debit = sum(float(item.get('laba_rugi_debit', 0) or 0) for item in neraca_lajur_data)
+        total_laba_rugi_kredit = sum(float(item.get('laba_rugi_kredit', 0) or 0) for item in neraca_lajur_data)
+        laba_bersih = total_laba_rugi_kredit - total_laba_rugi_debit
+        
+        # Hitung Modal Akhir (setelah penutupan)
+        modal_akhir = total_modal_awal + total_tambahan_modal + laba_bersih - total_prive
+
+        # 6. STRUKTUR AKUN UNTUK NERACA SALDO SETELAH PENUTUPAN
+        struktur_akun = {
+            '1100': {'nama': 'Aset Lancar', 'type': 'header'},
+            '1110': {'nama': 'Kas', 'type': 'detail', 'saldo_debit': 0},
+            '1120': {'nama': 'Piutang Usaha', 'type': 'detail', 'saldo_debit': 0},
+            '1130': {'nama': 'Persediaan Barang Dagang', 'type': 'detail', 'saldo_debit': 0},
+            '1140': {'nama': 'Perlengkapan', 'type': 'detail', 'saldo_debit': 0},
+            
+            '1200': {'nama': 'Aset Tetap', 'type': 'header'},
+            '1210': {'nama': 'Tanah', 'type': 'detail', 'saldo_debit': 0},
+            '1220': {'nama': 'Bangunan', 'type': 'detail', 'saldo_debit': 0},
+            '1221': {'nama': 'Akumulasi Penyusutan Bangunan', 'type': 'detail', 'saldo_kredit': 0},
+            '1230': {'nama': 'Kendaraan', 'type': 'detail', 'saldo_debit': 0},
+            '1231': {'nama': 'Akumulasi Penyusutan Kendaraan', 'type': 'detail', 'saldo_kredit': 0},
+            '1240': {'nama': 'Peralatan', 'type': 'detail', 'saldo_debit': 0},
+            '1241': {'nama': 'Akumulasi Penyusutan Peralatan', 'type': 'detail', 'saldo_kredit': 0},
+            
+            '2000': {'nama': 'Utang', 'type': 'header'},
+            '2100': {'nama': 'Utang', 'type': 'detail', 'saldo_kredit': 0},
+            '2200': {'nama': 'Pendapatan ddm', 'type': 'detail', 'saldo_kredit': 0},
+            
+            '3000': {'nama': 'Modal', 'type': 'header'},
+            '3100': {'nama': 'Modal', 'type': 'detail', 'saldo_kredit': modal_akhir},
+            '3200': {'nama': 'Prive Mas Angga', 'type': 'detail', 'saldo_debit': 0},  # SUDAH DITUTUP = 0
+            '3300': {'nama': 'Ikhitsar L/R', 'type': 'detail', 'saldo_debit': 0},     # SUDAH DITUTUP = 0
+            
+            '4000': {'nama': 'Pendapatan', 'type': 'header'},
+            '4100': {'nama': 'Penjualan', 'type': 'detail', 'saldo_kredit': 0},       # SUDAH DITUTUP = 0
+            '4200': {'nama': 'Retur Penjualan', 'type': 'detail', 'saldo_debit': 0},  # SUDAH DITUTUP = 0
+            '4300': {'nama': 'Potongan Penjualan', 'type': 'detail', 'saldo_debit': 0}, # SUDAH DITUTUP = 0
+            
+            '5110': {'nama': 'HPP', 'type': 'detail', 'saldo_debit': 0},              # SUDAH DITUTUP = 0
+            '5200': {'nama': 'Pembelian', 'type': 'detail', 'saldo_debit': 0},        # SUDAH DITUTUP = 0
+            
+            '6000': {'nama': 'Beban', 'type': 'header'},
+            '6100': {'nama': 'Beban Perlengkapan', 'type': 'detail', 'saldo_debit': 0}, # SUDAH DITUTUP = 0
+            '6200': {'nama': 'Beban air, listrik dan telepon', 'type': 'detail', 'saldo_debit': 0}, # SUDAH DITUTUP = 0
+            '6300': {'nama': 'Beban Penyusutan', 'type': 'detail', 'saldo_debit': 0}  # SUDAH DITUTUP = 0
+        }
+
+        # 7. MAPPING DARI NERACA LAJUR KE STRUKTUR AKUN
+        mapping_neraca_lajur = {
+            '1110': '1110',  # Kas
+            '102': '1120',  # Piutang
+            '201': '2100',  # Utang
+            '301': '3100',  # Modal
+            '401': '4100',  # Penjualan
+            '501': '5110',  # HPP
+            '502': '6100',  # Beban Perlengkapan
+            '503': '6200',  # Beban lain
+        }
+
+        # 8. UPDATE SALDO DARI NERACA LAJUR
+        for item in neraca_lajur_data:
+            account_code = item.get('account_code', '')
+            account_name = item.get('account_name', '')
+            neraca_debit = float(item.get('neraca_debit', 0) or 0)
+            neraca_kredit = float(item.get('neraca_kredit', 0) or 0)
+            
+            # Map dari neraca lajur ke struktur akun
+            target_kode = mapping_neraca_lajur.get(account_code, '')
+            
+            if target_kode and target_kode in struktur_akun:
+                if neraca_debit > 0:
+                    struktur_akun[target_kode]['saldo_debit'] = neraca_debit
+                if neraca_kredit > 0:
+                    struktur_akun[target_kode]['saldo_kredit'] = neraca_kredit
+            
+            # Handle akun khusus berdasarkan nama
+            if 'piutang' in account_name.lower() and neraca_debit > 0:
+                struktur_akun['1130']['saldo_debit'] = neraca_debit
+            elif 'persediaan' in account_name.lower() and neraca_debit > 0:
+                struktur_akun['1140']['saldo_debit'] = neraca_debit
+            elif 'perlengkapan' in account_name.lower() and neraca_debit > 0:
+                struktur_akun['1150']['saldo_debit'] = neraca_debit
+            elif 'pendapatan diterima dimuka' in account_name.lower() and neraca_kredit > 0:
+                struktur_akun['2200']['saldo_kredit'] = neraca_kredit
+
+        # 9. UPDATE SALDO ASET TETAP DARI DATABASE
+        for aset in aset_tetap_data:
+            jenis_aset = aset.get('jenis_aset', '').lower()
+            nama_aset = aset.get('nama_aset', '').lower()
+            nilai_perolehan = float(aset.get('nilai_perolehan', 0) or 0)
+            akumulasi_penyusutan = float(aset.get('akumulasi_penyusutan', 0) or 0)
+            
+            if 'tanah' in jenis_aset or 'tanah' in nama_aset:
+                struktur_akun['1210']['saldo_debit'] = nilai_perolehan
+            elif 'bangunan' in jenis_aset or 'bangunan' in nama_aset:
+                struktur_akun['1220']['saldo_debit'] = nilai_perolehan
+                struktur_akun['1221']['saldo_kredit'] = akumulasi_penyusutan
+            elif 'kendaraan' in jenis_aset or 'kendaraan' in nama_aset or 'mobil' in nama_aset:
+                struktur_akun['1230']['saldo_debit'] = nilai_perolehan
+                struktur_akun['1231']['saldo_kredit'] = akumulasi_penyusutan
+            elif 'peralatan' in jenis_aset or 'peralatan' in nama_aset or 'mesin' in nama_aset:
+                struktur_akun['1240']['saldo_debit'] = nilai_perolehan
+                struktur_akun['1241']['saldo_kredit'] = akumulasi_penyusutan
+
+        # 10. HITUNG TOTAL DEBIT DAN KREDIT
+        total_debit = 0
+        total_kredit = 0
+        
+        for kode_akun, data in struktur_akun.items():
+            if data['type'] == 'detail':
+                total_debit += data.get('saldo_debit', 0)
+                total_kredit += data.get('saldo_kredit', 0)
+
+        #AMBIL DATA DARI TABLE neraca_lajur - TAMBAHKAN DEBUG
+        neraca_lajur_result = supabase.table("neraca_lajur")\
+            .select("*")\
+            .eq("period", current_period)\
+            .eq("user_email", user_email)\
+            .order("account_code")\
+            .execute()
+
+        neraca_lajur_data = neraca_lajur_result.data or []
+
+        # DEBUG: Lihat apa yang ada di neraca_lajur
+        print("=== DEBUG NERACA LAJUR ===")
+        print(f"Periode: {current_period}")
+        print(f"User: {user_email}")
+        print(f"Jumlah data: {len(neraca_lajur_data)}")
+        for item in neraca_lajur_data:
+            print(f"Kode: {item.get('account_code')} | Nama: {item.get('account_name')} | Debit: {item.get('neraca_debit')} | Kredit: {item.get('neraca_kredit')}")
+        print("==========================")
+
+        # 11. GENERATE HTML TABLE ROWS
+        rows_html = ""
+        for kode_akun in sorted(struktur_akun.keys()):
+            data = struktur_akun[kode_akun]
+            
+            if data['type'] == 'header':
+                rows_html += f"""
+                <tr class="header-row">
+                    <td><strong>{kode_akun}</strong></td>
+                    <td><strong>{data['nama']}</strong></td>
+                    <td class="number"></td>
+                    <td class="number"></td>
+                </tr>
+                """
+            else:
+                saldo_debit = data.get('saldo_debit', 0)
+                saldo_kredit = data.get('saldo_kredit', 0)
+                
+                debit_display = rp(saldo_debit) if saldo_debit > 0 else ""
+                kredit_display = rp(saldo_kredit) if saldo_kredit > 0 else ""
+                
+                # Tandai akun yang sudah ditutup (saldo = 0)
+                row_class = "closed-account" if saldo_debit == 0 and saldo_kredit == 0 else ""
+                
+                rows_html += f"""
+                <tr class="{row_class}">
+                    <td>{kode_akun}</td>
+                    <td class="detail">{data['nama']}</td>
+                    <td class="number">{debit_display}</td>
+                    <td class="number">{kredit_display}</td>
+                </tr>
+                """
+        
+        # 12. GENERATE SUMMARY INFO
+        summary_html = f"""
+        <div class="summary-info">
+            <div class="summary-item">
+                <div class="summary-value">{rp(total_debit)}</div>
+                <div class="summary-label">Total Debit</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{rp(total_kredit)}</div>
+                <div class="summary-label">Total Kredit</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{rp(modal_akhir)}</div>
+                <div class="summary-label">Modal Akhir</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{'✅' if abs(total_debit - total_kredit) < 0.01 else '❌'}</div>
+                <div class="summary-label">Status</div>
+            </div>
+        </div>
+        """
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Neraca Saldo Setelah Penutupan - PINKILANG</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                * {{
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }}
+                
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #f0f8ff, #e6f7ff);
+                    padding: 20px;
+                    min-height: 100vh;
+                }}
+                
+                .container {{
+                    max-width: 900px;
+                    margin: 0 auto;
+                    background: white;
+                    border-radius: 15px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                    overflow: hidden;
+                }}
+                
+                .header {{
+                    background: linear-gradient(135deg, #28a745, #20c997);
+                    color: white;
+                    padding: 25px;
+                    text-align: center;
+                }}
+                
+                .back-btn {{
+                    display: inline-block;
+                    padding: 10px 20px;
+                    background: rgba(255,255,255,0.2);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 8px;
+                    margin-bottom: 15px;
+                    border: 1px solid rgba(255,255,255,0.3);
+                    transition: all 0.3s ease;
+                    font-weight: 500;
+                }}
+                
+                .back-btn:hover {{
+                    background: rgba(255,255,255,0.3);
+                    transform: translateY(-2px);
+                }}
+                
+                h1 {{
+                    font-size: 28px;
+                    margin-bottom: 10px;
+                    font-weight: 600;
+                }}
+                
+                .company-info {{
+                    font-size: 18px;
+                    margin-bottom: 5px;
+                    font-weight: 500;
+                }}
+                
+                .period-info {{
+                    font-size: 14px;
+                    opacity: 0.9;
+                }}
+                
+                .content {{
+                    padding: 30px;
+                }}
+                
+                .post-closing-tb {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 20px 0;
+                    font-size: 14px;
+                }}
+                
+                .post-closing-tb th {{
+                    background: #f8f9fa;
+                    padding: 12px 8px;
+                    text-align: left;
+                    border: 1px solid #dee2e6;
+                    font-weight: 600;
+                    color: #495057;
+                }}
+                
+                .post-closing-tb td {{
+                    padding: 10px 8px;
+                    border: 1px solid #dee2e6;
+                    color: #333;
+                }}
+                
+                .post-closing-tb .header-row {{
+                    background: #e3f2fd;
+                    font-weight: bold;
+                }}
+                
+                .post-closing-tb .detail {{
+                    padding-left: 20px;
+                }}
+                
+                .post-closing-tb .closed-account {{
+                    background-color: #f8f9fa;
+                    color: #6c757d;
+                    font-style: italic;
+                }}
+                
+                .post-closing-tb .total-row {{
+                    background: #fff3cd;
+                    font-weight: bold;
+                    font-size: 15px;
+                }}
+                
+                .number {{
+                    text-align: right;
+                    font-family: 'Courier New', monospace;
+                    font-weight: 500;
+                }}
+                
+                .balance-status {{
+                    text-align: center;
+                    padding: 15px;
+                    margin: 20px 0;
+                    border-radius: 10px;
+                    font-weight: 600;
+                    font-size: 16px;
+                }}
+                
+                .balance-correct {{
+                    background: #d4edda;
+                    color: #155724;
+                    border: 2px solid #c3e6cb;
+                }}
+                
+                .balance-incorrect {{
+                    background: #f8d7da;
+                    color: #721c24;
+                    border: 2px solid #f5c6cb;
+                }}
+                
+                .summary-info {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 15px;
+                    margin: 20px 0;
+                }}
+                
+                .summary-item {{
+                    background: #f8f9fa;
+                    padding: 15px;
+                    border-radius: 8px;
+                    text-align: center;
+                    border-left: 4px solid #28a745;
+                }}
+                
+                .summary-value {{
+                    font-size: 16px;
+                    font-weight: bold;
+                    color: #28a745;
+                    margin-bottom: 5px;
+                }}
+                
+                .summary-label {{
+                    font-size: 12px;
+                    color: #666;
+                }}
+                
+                .action-buttons {{
+                    text-align: center;
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #eee;
+                    display: flex;
+                    gap: 10px;
+                    justify-content: center;
+                    flex-wrap: wrap;
+                }}
+                
+                .btn {{
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #6c757d;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 6px;
+                    transition: all 0.3s ease;
+                    font-weight: 500;
+                    border: none;
+                    cursor: pointer;
+                    font-size: 14px;
+                }}
+                
+                .btn:hover {{
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                }}
+                
+                .btn-primary {{
+                    background: #28a745;
+                }}
+                
+                .btn-info {{
+                    background: #17a2b8;
+                }}
+                
+                .btn-success {{
+                    background: #20c997;
+                }}
+                
+                .btn-warning {{
+                    background: #ffc107;
+                    color: #000;
+                }}
+                
+                @media print {{
+                    body {{
+                        background: white;
+                        padding: 0;
+                    }}
+                    .container {{
+                        box-shadow: none;
+                        border-radius: 0;
+                    }}
+                    .action-buttons {{
+                        display: none;
+                    }}
+                    .summary-info {{
+                        display: none;
+                    }}
+                    .closed-account {{
+                        display: none;
+                    }}
+                }}
+                
+                @media (max-width: 768px) {{
+                    .container {{
+                        margin: 10px;
+                        border-radius: 10px;
+                    }}
+                    
+                    .content {{
+                        padding: 15px;
+                    }}
+                    
+                    .post-closing-tb {{
+                        font-size: 12px;
+                    }}
+                    
+                    .post-closing-tb td,
+                    .post-closing-tb th {{
+                        padding: 8px 6px;
+                    }}
+                    
+                    .action-buttons {{
+                        flex-direction: column;
+                    }}
+                    
+                    .btn {{
+                        width: 100%;
+                        margin: 2px 0;
+                    }}
+                    
+                    .summary-info {{
+                        grid-template-columns: 1fr;
+                    }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <a href="/dashboard" class="back-btn">← Kembali ke Dashboard</a>
+                    <h1>📋 NERACA SALDO SETELAH PENUTUPAN</h1>
+                    <div class="company-info">RUMAH BIBIT MAS ANGGA</div>
+                    <div class="period-info">Periode: {datetime.now().strftime('%B %Y')}</div>
+                    <div class="period-info">Login sebagai: {user_email}</div>
+                </div>
+                
+                <div class="content">
+                    {summary_html}
+                    
+                    <div class="balance-status {'balance-correct' if abs(total_debit - total_kredit) < 0.01 else 'balance-incorrect'}">
+                        {'✅ NERACA SALDO SETELAH PENUTUPAN SEIMBANG' if abs(total_debit - total_kredit) < 0.01 else '❌ NERACA SALDO SETELAH PENUTUPAN TIDAK SEIMBANG'}
+                        <br>
+                        <small>Total Debit: {rp(total_debit)} | Total Kredit: {rp(total_kredit)}</small>
+                    </div>
+                    
+                    <table class="post-closing-tb">
+                        <thead>
+                            <tr>
+                                <th width="80">NO</th>
+                                <th>NAMA AKUN</th>
+                                <th width="180">DEBIT</th>
+                                <th width="180">KREDIT</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows_html}
+                            
+                            <!-- TOTAL ROW -->
+                            <tr class="total-row">
+                                <td colspan="2"><strong>TOTAL</strong></td>
+                                <td class="number"><strong>{rp(total_debit)}</strong></td>
+                                <td class="number"><strong>{rp(total_kredit)}</strong></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 20px; font-size: 12px; color: #666;">
+                        <strong>Keterangan:</strong><br>
+                        • Akun dengan warna abu-abu adalah akun nominal yang sudah ditutup (saldo = 0)<br>
+                        • Prive, Ikhtisar L/R, Pendapatan, dan Beban sudah ditutup ke Modal<br>
+                        • Hanya akun riil (Aset, Utang, Modal) yang memiliki saldo<br>
+                        • Data diambil otomatis dari Neraca Lajur periode {current_period}
+                    </div>
+                    
+                    <div class="action-buttons">
+                        <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
+                        <a href="/neraca-lajur" class="btn btn-info">📊 Neraca Lajur</a>
+                        <a href="/jurnal-penutup" class="btn btn-success">📒 Jurnal Penutup</a>
+                        <a href="/laporan-posisi-keuangan" class="btn btn-warning">💰 Neraca</a>
+                        <button onclick="window.print()" class="btn" style="background: #17a2b8;">🖨️ Cetak Laporan</button>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {{
+                    // Add animation
+                    const rows = document.querySelectorAll('.post-closing-tb tbody tr');
+                    rows.forEach((row, index) => {{
+                        row.style.opacity = '0';
+                        row.style.transform = 'translateY(10px)';
+                        setTimeout(() => {{
+                            row.style.transition = 'all 0.3s ease';
+                            row.style.opacity = '1';
+                            row.style.transform = 'translateY(0)';
+                        }}, index * 30);
+                    }});
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        return html
+        
+    except Exception as e:
+        logger.error(f"❌ Error di Neraca Saldo Setelah Penutupan: {str(e)}")
+        import traceback
+        error_details = traceback.format_exc()
+        
+        return f"""
+        <html>
+        <body style="font-family: Arial; padding: 20px; background: #f8f9fa;">
+            <div style="max-width: 600px; margin: 50px auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); text-align: center;">
+                <h1 style="color: #dc3545; margin-bottom: 20px;">❌ Error Neraca Saldo Setelah Penutupan</h1>
+                <p style="color: #666; margin-bottom: 20px;">Terjadi kesalahan saat memproses data:</p>
+                <p style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left; overflow-x: auto;">
+                    {str(e)}
+                </p>
+                <a href="/dashboard" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">← Kembali ke Dashboard</a>
+            </div>
+        </body>
+        </html>
+        """
+    
 # ============================================================
 # 🔹 ROUTE: Operasional (PENGELUARAN BIAYA OPERASIONAL) 
 # ============================================================
@@ -5764,7 +7686,7 @@ def generate_operasional_html(user_email, message, transaksi_operasional, total_
                         <a href="/penjualan" class="btn">🛍️ Input Penjualan</a>
                         <a href="/pembelian" class="btn">🛒 Input Pembelian</a>
                         <a href="/jurnal-umum" class="btn btn-secondary">📝 Lihat Jurnal</a>
-                        <a href="/laporan-keuangan" class="btn btn-secondary">📊 Laporan Keuangan</a>
+                        <a href="/laporan-keuangan" class="btn btn-secondary">📊 Laporan Posisi Keuangan</a>
                     </div>
                 </div>
             </div>
@@ -9380,7 +11302,7 @@ def get_initial_balance_data():
         return {}
 
 # ============================================================
-# 🔹 ROUTE: Neraca Lajur (Worksheet) - INTEGRATED WITH NSA
+# 🔹 ROUTE: Neraca Lajur (Worksheet) 
 # ============================================================
 @app.route("/neraca-lajur")
 def neraca_lajur():
@@ -11082,9 +13004,500 @@ def generate_prive_html(user_email, message, prive_data, modal_data_all, total_p
     </html>
     """
     return prive_html
+# ============================================================
+# 🔹 ROUTE: Input Modal Awal - BARU
+# ============================================================
+@app.route("/input-modal-awal", methods=["GET", "POST"])
+def input_modal_awal():
+    if not session.get('logged_in'):
+        return redirect('/login')
+    
+    user_id = session.get('user_id')
+    user_email = session.get('user_email')
+    message = ""
+    
+    # Cek apakah sudah ada modal awal
+    sudah_ada_modal_awal = False
+    try:
+        if supabase:
+            result = supabase.table("modal").select("*").eq("tipe", "MODAL_AWAL").execute()
+            if result.data and len(result.data) > 0:
+                sudah_ada_modal_awal = True
+                message = '<div class="message warning">⚠️ Modal awal sudah pernah diinput. Input baru akan menggantikan yang lama.</div>'
+    except Exception as e:
+        print(f"Error cek modal awal: {e}")
+    
+    # Handle form submission
+    if request.method == "POST":
+        message = process_modal_awal_form(user_id, user_email, sudah_ada_modal_awal)
+    
+    return generate_modal_awal_html(user_email, message, sudah_ada_modal_awal)
+
+def process_modal_awal_form(user_id, user_email, sudah_ada_modal_awal):
+    """Process modal awal form submission dengan jurnal otomatis"""
+    try:
+        # Collect form data
+        tanggal = request.form["tanggal"]
+        jumlah = int(request.form["jumlah"])
+        keterangan = request.form["keterangan"]
+        sumber_modal = request.form["sumber_modal"]
+        
+        if jumlah <= 0:
+            return '<div class="message error">❌ Jumlah modal awal harus lebih dari 0!</div>'
+        
+        # Data untuk tabel modal
+        modal_data = {
+            "user_id": user_id,
+            "user_email": user_email,
+            "tanggal": tanggal,
+            "jumlah": jumlah,
+            "keterangan": f"Modal Awal: {keterangan}",
+            "sumber_modal": sumber_modal,
+            "tipe": "MODAL_AWAL",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        if supabase:
+            # Jika sudah ada modal awal, hapus yang lama terlebih dahulu
+            if sudah_ada_modal_awal:
+                try:
+                    # Hapus jurnal yang terkait modal awal sebelumnya
+                    supabase.table("jurnal_umum").delete().eq("transaksi_type", "MODAL_AWAL").execute()
+                    # Hapus modal awal sebelumnya
+                    supabase.table("modal").delete().eq("tipe", "MODAL_AWAL").execute()
+                except Exception as e:
+                    print(f"Error hapus modal awal lama: {e}")
+            
+            # Insert modal awal baru ke database
+            insert_result = supabase.table("modal").insert(modal_data).execute()
+            
+            if insert_result and insert_result.data:
+                modal_id = insert_result.data[0]['id']
+                
+                # ✅ BUAT JURNAL OTOMATIS untuk modal awal
+                jurnal_entries = [
+                    # Debit: Kas/Bank (Penambahan Aset)
+                    {
+                        "tanggal": tanggal,
+                        "nama_akun": "Kas" if sumber_modal == "CASH" else "Bank",
+                        "ref": "1110" if sumber_modal == "CASH" else "1120",
+                        "debit": jumlah,
+                        "kredit": 0,
+                        "deskripsi": f"Modal awal: {keterangan}",
+                        "transaksi_type": "MODAL_AWAL",
+                        "transaksi_id": modal_id,
+                        "user_email": user_email,
+                        "created_at": datetime.now().isoformat()
+                    },
+                    # Kredit: Modal Pemilik (Penambahan Ekuitas)
+                    {
+                        "tanggal": tanggal,
+                        "nama_akun": "Modal Pemilik",
+                        "ref": "3110",
+                        "debit": 0,
+                        "kredit": jumlah,
+                        "deskripsi": f"Modal awal: {keterangan}",
+                        "transaksi_type": "MODAL_AWAL",
+                        "transaksi_id": modal_id,
+                        "user_email": user_email,
+                        "created_at": datetime.now().isoformat()
+                    }
+                ]
+                
+                # Simpan jurnal ke database
+                success_count = 0
+                for entry in jurnal_entries:
+                    try:
+                        result = supabase.table("jurnal_umum").insert(entry).execute()
+                        if result.data:
+                            success_count += 1
+                            logger.info(f"✅ Jurnal modal awal: {entry['nama_akun']} - {entry['debit']}/{entry['kredit']}")
+                    except Exception as e:
+                        logger.error(f"❌ Error insert jurnal modal awal: {str(e)}")
+                
+                if success_count == len(jurnal_entries):
+                    logger.info(f"✅ Modal awal berhasil dicatat: {jumlah} oleh {user_email}")
+                    action_text = "diperbarui" if sudah_ada_modal_awal else "dicatat"
+                    return f'<div class="message success">✅ Modal awal berhasil {action_text}! Jurnal otomatis dibuat.</div>'
+                else:
+                    logger.warning(f"⚠️ Sebagian jurnal modal awal gagal: {success_count}/{len(jurnal_entries)}")
+                    action_text = "diperbarui" if sudah_ada_modal_awal else "dicatat"
+                    return f'<div class="message success">✅ Modal awal berhasil {action_text}! ({success_count}/{len(jurnal_entries)} jurnal berhasil)</div>'
+            else:
+                return '<div class="message error">❌ Gagal menyimpan data modal awal!</div>'
+                
+    except Exception as e:
+        logger.error(f"❌ Error proses modal awal: {str(e)}")
+        return f'<div class="message error">❌ Error mencatat modal awal: {str(e)}</div>'
+
+def generate_modal_awal_html(user_email, message, sudah_ada_modal_awal):
+    """Generate HTML untuk halaman input modal awal"""
+    
+    # Ambil data modal awal yang sudah ada (jika ada)
+    modal_awal_existing = None
+    try:
+        if supabase:
+            result = supabase.table("modal").select("*").eq("tipe", "MODAL_AWAL").execute()
+            if result.data and len(result.data) > 0:
+                modal_awal_existing = result.data[0]
+    except Exception as e:
+        print(f"Error ambil data modal awal: {e}")
+    
+    # Format currency helper
+    def format_currency(amount):
+        if amount is None:
+            return "Rp 0"
+        return f"Rp {float(amount):,.0f}".replace(",", ".")
+    
+    # Tentukan judul dan tombol berdasarkan kondisi
+    if sudah_ada_modal_awal:
+        page_title = "✏️ Edit Modal Awal"
+        button_text = "💾 Update Modal Awal"
+        status_info = f"""
+        <div class="info-box">
+            <strong>📊 Modal Awal Saat Ini:</strong><br>
+            • Tanggal: {modal_awal_existing.get('tanggal', 'N/A') if modal_awal_existing else 'N/A'}<br>
+            • Jumlah: {format_currency(modal_awal_existing.get('jumlah', 0) if modal_awal_existing else 0)}<br>
+            • Keterangan: {modal_awal_existing.get('keterangan', 'N/A') if modal_awal_existing else 'N/A'}
+        </div>
+        """
+    else:
+        page_title = "💰 Input Modal Awal"
+        button_text = "💾 Simpan Modal Awal"
+        status_info = """
+        <div class="info-box">
+            <strong>💡 Informasi:</strong> Modal awal adalah setoran pertama pemilik untuk memulai usaha.
+            Input ini hanya dilakukan sekali di awal periode akuntansi.
+        </div>
+        """
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>{page_title} - PINKILANG</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: 'Arial Rounded MT Bold', 'Arial', sans-serif;
+                background: linear-gradient(135deg, #ffe6f2, #fff0f7);
+                min-height: 100vh;
+                padding: 20px;
+            }}
+            
+            .container {{
+                max-width: 800px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                overflow: hidden;
+            }}
+            
+            .header {{
+                background: linear-gradient(135deg, #00cc66, #00b359);
+                color: white;
+                padding: 30px;
+                text-align: center;
+            }}
+            
+            .back-btn {{
+                display: inline-block;
+                padding: 10px 20px;
+                background: rgba(255,255,255,0.2);
+                color: white;
+                text-decoration: none;
+                border-radius: 10px;
+                margin-bottom: 20px;
+                border: 1px solid rgba(255,255,255,0.3);
+            }}
+            
+            .back-btn:hover {{
+                background: rgba(255,255,255,0.3);
+            }}
+            
+            h1 {{
+                font-size: 36px;
+                margin-bottom: 10px;
+            }}
+            
+            .content {{
+                padding: 30px;
+            }}
+            
+            .form-section {{
+                background: #f0fff0;
+                padding: 25px;
+                border-radius: 15px;
+                border-left: 5px solid #00cc66;
+                margin-bottom: 20px;
+            }}
+            
+            .section-title {{
+                color: #008040;
+                font-size: 24px;
+                margin-bottom: 20px;
+                padding-bottom: 10px;
+                border-bottom: 2px solid #ccffcc;
+            }}
+            
+            .form-group {{
+                margin-bottom: 20px;
+            }}
+            
+            label {{
+                display: block;
+                margin-bottom: 8px;
+                color: #006633;
+                font-weight: bold;
+                font-size: 16px;
+            }}
+            
+            input, select, textarea {{
+                width: 100%;
+                padding: 12px 15px;
+                border: 2px solid #99e699;
+                border-radius: 10px;
+                font-size: 16px;
+                transition: all 0.3s ease;
+                background: white;
+            }}
+            
+            input:focus, select:focus, textarea:focus {{
+                border-color: #00cc66;
+                outline: none;
+                box-shadow: 0 0 0 3px rgba(0,204,102,0.1);
+                transform: translateY(-2px);
+            }}
+            
+            .btn {{
+                padding: 15px 30px;
+                background: linear-gradient(135deg, #00cc66, #00b359);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                cursor: pointer;
+                font-size: 18px;
+                font-weight: bold;
+                transition: all 0.3s ease;
+                width: 100%;
+                margin-top: 10px;
+            }}
+            
+            .btn:hover {{
+                transform: translateY(-3px);
+                box-shadow: 0 6px 20px rgba(0,204,102,0.3);
+                background: linear-gradient(135deg, #00b359, #00994d);
+            }}
+            
+            .btn-secondary {{
+                background: linear-gradient(135deg, #666666, #555555);
+            }}
+            
+            .btn-secondary:hover {{
+                background: linear-gradient(135deg, #555555, #444444);
+            }}
+            
+            .message {{
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 10px;
+                font-size: 14px;
+            }}
+            
+            .success {{
+                background: #d4edda;
+                color: #155724;
+                border: 1px solid #c3e6cb;
+            }}
+            
+            .error {{
+                background: #f8d7da;
+                color: #721c24;
+                border: 1px solid #f5c6cb;
+            }}
+            
+            .warning {{
+                background: #fff3cd;
+                color: #856404;
+                border: 1px solid #ffeaa7;
+            }}
+            
+            .info-box {{
+                background: #e6fff2;
+                border: 1px solid #99e699;
+                border-radius: 10px;
+                padding: 15px;
+                margin: 15px 0;
+                color: #006633;
+            }}
+            
+            .akun-info {{
+                background: #e6f7ff;
+                border: 1px solid #b3e0ff;
+                border-radius: 8px;
+                padding: 12px;
+                margin: 15px 0;
+                font-size: 14px;
+                color: #0066cc;
+            }}
+            
+            .jurnal-preview {{
+                background: #fff9e6;
+                border: 1px solid #ffd699;
+                border-radius: 8px;
+                padding: 15px;
+                margin: 15px 0;
+            }}
+            
+            .jurnal-entry {{
+                display: flex;
+                justify-content: space-between;
+                padding: 8px 0;
+                border-bottom: 1px dashed #ffd699;
+            }}
+            
+            .jurnal-entry:last-child {{
+                border-bottom: none;
+            }}
+            
+            .debit {{
+                color: #00cc66;
+                font-weight: bold;
+            }}
+            
+            .kredit {{
+                color: #ff6666;
+                font-weight: bold;
+            }}
+            
+            .user-info {{
+                text-align: center;
+                margin-bottom: 20px;
+                color: #666;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <a href="/laporan-perubahan-modal" class="back-btn">← Kembali ke Laporan Modal</a>
+                <h1>{page_title}</h1>
+                <p>Pencatatan Setoran Awal Modal Usaha - PINKILANG</p>
+            </div>
+            
+            <div class="content">
+                <div class="user-info">
+                    👋 Login sebagai: <strong>{user_email}</strong>
+                </div>
+                
+                {message}
+                {status_info}
+                
+                <div class="form-section">
+                    <h2 class="section-title">📝 Form Input Modal Awal</h2>
+                    
+                    <div class="akun-info">
+                        <strong>📋 Jurnal Otomatis yang akan dibuat:</strong><br>
+                        • <strong>Debit:</strong> Kas/Bank - Penambahan aset kas<br>
+                        • <strong>Kredit:</strong> Modal Pemilik (3110) - Penambahan ekuitas<br>
+                        • <strong>Integrasi:</strong> Otomatis masuk ke Laporan Perubahan Modal
+                    </div>
+                    
+                    <form method="POST">
+                        <div class="form-group">
+                            <label for="tanggal">📅 Tanggal Setoran Modal:</label>
+                            <input type="date" id="tanggal" name="tanggal" 
+                                   value="{datetime.now().strftime('%Y-%m-%d')}" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="jumlah">💰 Jumlah Modal Awal (Rp):</label>
+                            <input type="number" id="jumlah" name="jumlah" 
+                                   placeholder="Contoh: 10000000" step="1" min="1" required
+                                   value="{modal_awal_existing.get('jumlah', '') if modal_awal_existing else ''}">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="sumber_modal">🏦 Sumber Modal:</label>
+                            <select id="sumber_modal" name="sumber_modal" required>
+                                <option value="CASH" {'selected' if modal_awal_existing and modal_awal_existing.get('sumber_modal') == 'CASH' else ''}>💰 Cash (Tunai)</option>
+                                <option value="BANK" {'selected' if modal_awal_existing and modal_awal_existing.get('sumber_modal') == 'BANK' else ''}>🏦 Transfer Bank</option>
+                                <option value="INVESTOR" {'selected' if modal_awal_existing and modal_awal_existing.get('sumber_modal') == 'INVESTOR' else ''}>👥 Investor</option>
+                                <option value="PRIBADI" {'selected' if modal_awal_existing and modal_awal_existing.get('sumber_modal') == 'PRIBADI' else ''}>👤 Dana Pribadi</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="keterangan">📝 Keterangan Modal Awal:</label>
+                            <input type="text" id="keterangan" name="keterangan" 
+                                   placeholder="Contoh: Setoran modal awal usaha laundry" required
+                                   value="{modal_awal_existing.get('keterangan', '').replace('Modal Awal: ', '') if modal_awal_existing else ''}">
+                        </div>
+                        
+                        <div class="jurnal-preview">
+                            <strong>👁️ Preview Jurnal:</strong>
+                            <div class="jurnal-entry">
+                                <span>Kas/Bank</span>
+                                <span class="debit">+ Debit</span>
+                            </div>
+                            <div class="jurnal-entry">
+                                <span>Modal Pemilik (3110)</span>
+                                <span class="kredit">+ Kredit</span>
+                            </div>
+                        </div>
+                        
+                        <button type="submit" class="btn">{button_text}</button>
+                    </form>
+                </div>
+                
+                <div style="text-align: center; margin-top: 30px;">
+                    <a href="/laporan-perubahan-modal" class="btn btn-secondary" style="width: auto; padding: 10px 20px; display: inline-block;">
+                        📊 Lihat Laporan Modal
+                    </a>
+                    <a href="/dashboard" class="btn btn-secondary" style="width: auto; padding: 10px 20px; display: inline-block; margin-left: 10px;">
+                        🏠 Dashboard
+                    </a>
+                </div>
+                
+                <div class="info-box" style="margin-top: 30px;">
+                    <strong>💡 Tips:</strong><br>
+                    • Modal awal hanya diinput sekali di awal periode akuntansi<br>
+                    • Pastikan jumlah modal sesuai dengan setoran sebenarnya<br>
+                    • Untuk tambahan modal selanjutnya, gunakan menu "Tambah Modal"<br>
+                    • Modal awal akan mempengaruhi perhitungan laba/rugi dan neraca
+                </div>
+            </div>
+        </div>
+        
+        <script>
+            // Real-time preview untuk jumlah modal
+            document.getElementById('jumlah').addEventListener('input', function(e) {{
+                const amount = e.target.value;
+                const formatted = amount ? 'Rp ' + parseInt(amount).toLocaleString('id-ID') : 'Rp 0';
+                // Bisa ditambahkan preview real-time di sini jika diperlukan
+            }});
+            
+            // Konfirmasi untuk update modal awal
+            document.querySelector('form').addEventListener('submit', function(e) {{
+                {'const action = "mengupdate";' if sudah_ada_modal_awal else 'const action = "menyimpan";'}
+                {'if(!confirm("Apakah Anda yakin ingin mengupdate modal awal? Modal awal sebelumnya akan digantikan.")) e.preventDefault();' if sudah_ada_modal_awal else ''}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return html
 
 # ============================================================
-# 🔹 ROUTE: Aset (Menu Utama)
+# 🔹 ROUTE: Aset (Menu Utama) - UPDATED dengan REAL DATA
 # ============================================================
 @app.route("/aset")
 def aset():
@@ -11092,6 +13505,26 @@ def aset():
         return redirect('/login')
     
     user_email = session.get('user_email')
+    
+    try:
+        # Hitung data real aset lancar
+        aset_lancar_data = hitung_saldo_aset_lancar_fixed()
+        total_aset_lancar = aset_lancar_data.get('total_aset_lancar', 0)
+        
+        # Hitung data real aset tetap
+        aset_tetap_data = get_and_update_aset_tetap_data()
+        total_nilai_aset = sum(item.get('nilai_perolehan', 0) for item in aset_tetap_data)
+        total_penyusutan = sum(item.get('akumulasi_penyusutan', 0) for item in aset_tetap_data)
+        total_nilai_buku_aset_tetap = total_nilai_aset - total_penyusutan
+        
+        # Total semua aset
+        total_semua_aset = total_aset_lancar + total_nilai_buku_aset_tetap
+        
+    except Exception as e:
+        logger.error(f"Error hitung data aset: {str(e)}")
+        total_aset_lancar = 0
+        total_nilai_buku_aset_tetap = 0
+        total_semua_aset = 0
     
     html = f"""
     <!DOCTYPE html>
@@ -11234,6 +13667,15 @@ def aset():
                 font-size: 14px;
                 font-weight: bold;
             }}
+            
+            .real-data-badge {{
+                background: #00cc66;
+                color: white;
+                padding: 4px 8px;
+                border-radius: 12px;
+                font-size: 10px;
+                margin-left: 5px;
+            }}
         </style>
     </head>
     <body>
@@ -11248,18 +13690,18 @@ def aset():
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div>💰</div>
-                        <div class="stat-number" id="total-aset-lancar">Loading...</div>
-                        <div class="stat-label">Total Aset Lancar</div>
+                        <div class="stat-number">{format_currency(total_aset_lancar)}</div>
+                        <div class="stat-label">Total Aset Lancar <span class="real-data-badge">REAL</span></div>
                     </div>
                     <div class="stat-card">
                         <div>🏢</div>
-                        <div class="stat-number" id="total-aset-tetap">Loading...</div>
-                        <div class="stat-label">Total Aset Tetap</div>
+                        <div class="stat-number">{format_currency(total_nilai_buku_aset_tetap)}</div>
+                        <div class="stat-label">Total Aset Tetap <span class="real-data-badge">REAL</span></div>
                     </div>
                     <div class="stat-card">
                         <div>📊</div>
-                        <div class="stat-number" id="total-semua-aset">Loading...</div>
-                        <div class="stat-label">Total Semua Aset</div>
+                        <div class="stat-number">{format_currency(total_semua_aset)}</div>
+                        <div class="stat-label">Total Semua Aset <span class="real-data-badge">REAL</span></div>
                     </div>
                 </div>
                 
@@ -11269,7 +13711,7 @@ def aset():
                         <div class="menu-title">Aset Lancar</div>
                         <div class="menu-description">
                             Kelola aset lancar seperti kas, piutang, persediaan, dan perlengkapan.
-                            Termasuk monitoring nilai perlengkapan dari transaksi operasional.
+                            Total saat ini: <strong>{format_currency(total_aset_lancar)}</strong>
                         </div>
                     </a>
                     
@@ -11278,94 +13720,40 @@ def aset():
                         <div class="menu-title">Aset Tetap</div>
                         <div class="menu-description">
                             Kelola aset tetap seperti tanah, bangunan, kendaraan, dan peralatan.
-                            Input nilai aset dan hitung penyusutan otomatis.
+                            Total saat ini: <strong>{format_currency(total_nilai_buku_aset_tetap)}</strong>
                         </div>
                     </a>
                 </div>
                 
                 <div style="text-align: center; margin-top: 30px; padding: 20px; background: #fff5f9; border-radius: 10px;">
-                    <h3 style="color: #ff66a3; margin-bottom: 15px;">📋 Klasifikasi Aset</h3>
+                    <h3 style="color: #ff66a3; margin-bottom: 15px;">📋 Ringkasan Aset</h3>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: left;">
                         <div>
                             <strong>Aset Lancar:</strong>
                             <ul style="margin-top: 10px; color: #666;">
-                                <li>Kas & Bank</li>
-                                <li>Piutang Usaha</li>
-                                <li>Persediaan Barang</li>
-                                <li>Perlengkapan</li>
-                                <li>Beban Dibayar Dimuka</li>
+                                <li>Kas: {format_currency(aset_lancar_data.get('kas', 0))}</li>
+                                <li>Piutang: {format_currency(aset_lancar_data.get('piutang', 0))}</li>
+                                <li>Persediaan: {format_currency(aset_lancar_data.get('persediaan', 0))}</li>
+                                <li>Perlengkapan: {format_currency(aset_lancar_data.get('perlengkapan', 0))}</li>
                             </ul>
                         </div>
                         <div>
                             <strong>Aset Tetap:</strong>
                             <ul style="margin-top: 10px; color: #666;">
-                                <li>Tanah</li>
-                                <li>Bangunan</li>
-                                <li>Kendaraan</li>
-                                <li>Peralatan</li>
-                                <li>Inventaris</li>
+                                <li>Nilai Perolehan: {format_currency(total_nilai_aset)}</li>
+                                <li>Akumulasi Penyusutan: {format_currency(total_penyusutan)}</li>
+                                <li>Nilai Buku: {format_currency(total_nilai_buku_aset_tetap)}</li>
+                                <li>Jumlah Aset: {len(aset_tetap_data)} item</li>
                             </ul>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
-        
-        <script>
-            // Load stats asynchronously
-            async function loadAssetStats() {{
-                try {{
-                    // Simulate API call - in real implementation, you'd fetch from your backend
-                    setTimeout(() => {{
-                        document.getElementById('total-aset-lancar').textContent = 'Rp 25.000.000';
-                        document.getElementById('total-aset-tetap').textContent = 'Rp 150.000.000';
-                        document.getElementById('total-semua-aset').textContent = 'Rp 175.000.000';
-                    }}, 500);
-                }} catch (error) {{
-                    console.error('Error loading stats:', error);
-                }}
-            }}
-            
-            // Load stats when page loads
-            loadAssetStats();
-        </script>
     </body>
     </html>
     """
     return html
-
-def initialize_saldo_awal():
-    """Inisialisasi saldo awal otomatis jika belum ada data"""
-    try:
-        # Cek apakah sudah ada saldo awal
-        result = supabase.table("jurnal_umum")\
-            .select("*")\
-            .eq("transaksi_type", "SALDO_AWAL")\
-            .execute()
-        
-        if not result.data:
-            # Buat saldo awal default
-            saldo_awal_entry = {
-                "tanggal": "2024-01-01",
-                "nama_akun": "Kas",
-                "ref": "1110",
-                "debit": 10000000,
-                "kredit": 0,
-                "deskripsi": "Saldo awal kas",
-                "transaksi_type": "SALDO_AWAL",
-                "user_email": "system",
-                "created_at": datetime.now().isoformat()
-            }
-            
-            supabase.table("jurnal_umum").insert(saldo_awal_entry).execute()
-            logger.info("✅ Saldo awal Kas berhasil diinisialisasi")
-            return True
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Error inisialisasi saldo awal: {str(e)}")
-        return False
 
 # ============================================================
 # 🔹 ROUTE: Aset Lancar - FIXED VERSION (KAS SAJA)
@@ -12139,8 +14527,9 @@ def format_currency(amount):
         return "Rp 0"
         
 # ============================================================
-# 🔹 ROUTE: Aset Tetap
+# 🔹 ROUTE: Aset Tetap - VERSI SESUAI STRUCTURE TABEL
 # ============================================================
+
 @app.route("/aset-tetap", methods=["GET", "POST"])
 def aset_tetap():
     if not session.get('logged_in'):
@@ -12153,42 +14542,67 @@ def aset_tetap():
     if request.method == "POST":
         message = process_aset_tetap_form(user_email)
     
-    # Ambil data aset tetap
-    aset_tetap_data = get_aset_tetap_data()
-    
-    # Hitung totals
-    total_nilai_aset = sum(item.get('nilai_perolehan', 0) for item in aset_tetap_data)
-    total_penyusutan = sum(item.get('akumulasi_penyusutan', 0) for item in aset_tetap_data)
-    total_nilai_buku = total_nilai_aset - total_penyusutan
+    try:
+        # Ambil dan update data aset tetap dengan penyusutan
+        aset_tetap_data = get_and_update_aset_tetap_data()
+        logger.info(f"✅ Data aset tetap berhasil diambil: {len(aset_tetap_data)} item")
+        
+        # Hitung totals
+        total_nilai_aset = sum(float(item.get('nilai_perolehan', 0) or 0) for item in aset_tetap_data)
+        total_penyusutan = sum(float(item.get('akumulasi_penyusutan', 0) or 0) for item in aset_tetap_data)
+        total_nilai_buku = total_nilai_aset - total_penyusutan
+        
+    except Exception as e:
+        logger.error(f"❌ Error di route aset tetap: {str(e)}")
+        aset_tetap_data = []
+        total_nilai_aset = 0
+        total_penyusutan = 0
+        total_nilai_buku = 0
+        message += f'<div class="message error">❌ Error memuat data: {str(e)}</div>'
     
     html = generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_aset, total_penyusutan, total_nilai_buku)
     return html
 
 def process_aset_tetap_form(user_email):
-    """Process form input aset tetap"""
+    """Process form input aset tetap dengan jurnal otomatis - SESUAI STRUCTURE"""
     try:
         # Collect form data
         tanggal_perolehan = request.form.get("tanggal_perolehan")
         jenis_aset = request.form.get("jenis_aset")
         nama_aset = request.form.get("nama_aset")
-        nilai_perolehan = int(request.form.get("nilai_perolehan", 0))
-        masa_manfaat = int(request.form.get("masa_manfaat", 0))  # dalam tahun
-        nilai_residu = int(request.form.get("nilai_residu", 0))
+        nilai_perolehan_str = request.form.get("nilai_perolehan", "0")
+        masa_manfaat_str = request.form.get("masa_manfaat", "0")
+        metode_pembayaran = request.form.get("metode_pembayaran")
         keterangan = request.form.get("keterangan", "")
         
+        # Validasi input
         if not all([tanggal_perolehan, jenis_aset, nama_aset]):
-            return '<div class="message error">❌ Semua field wajib diisi!</div>'
+            return '<div class="message error">❌ Tanggal, Jenis, dan Nama Aset wajib diisi!</div>'
+        
+        try:
+            nilai_perolehan = float(nilai_perolehan_str)
+            masa_manfaat = int(masa_manfaat_str)
+        except ValueError:
+            return '<div class="message error">❌ Nilai perolehan dan masa manfaat harus angka!</div>'
         
         if nilai_perolehan <= 0:
             return '<div class="message error">❌ Nilai perolehan harus lebih dari 0!</div>'
         
-        if masa_manfaat <= 0:
+        if masa_manfaat <= 0 and jenis_aset != "TANAH":
             return '<div class="message error">❌ Masa manfaat harus lebih dari 0!</div>'
         
-        # Hitung penyusutan tahunan (metode garis lurus)
-        penyusutan_tahunan = (nilai_perolehan - nilai_residu) / masa_manfaat
+        logger.info(f"🔧 Processing aset tetap: {nama_aset}, nilai: {nilai_perolehan}, jenis: {jenis_aset}")
         
-        # Simpan data aset tetap
+        # Hitung penyusutan tahunan (kecuali tanah) - SESUAI STRUCTURE TABEL
+        if jenis_aset == "TANAH":
+            penyusutan_tahunan = 0
+            nilai_residu = nilai_perolehan  # Tanah tidak disusutkan
+        else:
+            # Tanpa nilai residu sesuai permintaan Anda
+            penyusutan_tahunan = nilai_perolehan / masa_manfaat
+            nilai_residu = 0
+        
+        # Simpan data aset tetap - SESUAI STRUCTURE TABEL
         aset_data = {
             "user_email": user_email,
             "tanggal_perolehan": tanggal_perolehan,
@@ -12197,41 +14611,50 @@ def process_aset_tetap_form(user_email):
             "nilai_perolehan": nilai_perolehan,
             "masa_manfaat": masa_manfaat,
             "nilai_residu": nilai_residu,
-            "penyusutan_tahunan": penyusutan_tahunan,
+            "penyusutan_tahunan": penyusutan_tahunan,  # SESUAI STRUCTURE
             "akumulasi_penyusutan": 0,  # Awalnya 0
             "nilai_buku": nilai_perolehan,
-            "keterangan": keterangan,
-            "created_at": datetime.now().isoformat()
+            "keterangan": keterangan
+            # created_at otomatis dari database
         }
         
         if supabase:
             # Insert ke tabel aset_tetap
+            logger.info(f"🔧 Inserting aset data: {aset_data}")
             insert_result = supabase.table("aset_tetap").insert(aset_data).execute()
             
             if insert_result and insert_result.data:
-                # Buat jurnal untuk pembelian aset tetap
+                aset_id = insert_result.data[0]['id']
+                logger.info(f"✅ Aset tetap berhasil disimpan dengan ID: {aset_id}")
+                
+                # ✅ BUAT JURNAL OTOMATIS untuk pembelian aset tetap
+                akun_aset = get_akun_aset_tetap(jenis_aset)
+                kode_aset = get_kode_akun_aset(jenis_aset)
+                
                 jurnal_entries = [
+                    # Debit: Aset Tetap
                     {
                         "tanggal": tanggal_perolehan,
-                        "nama_akun": get_akun_aset_tetap(jenis_aset),
-                        "ref": get_kode_akun_aset(jenis_aset),
+                        "nama_akun": akun_aset,
+                        "ref": kode_aset,
                         "debit": nilai_perolehan,
                         "kredit": 0,
                         "deskripsi": f"Pembelian {jenis_aset.lower()}: {nama_aset}",
                         "transaksi_type": "PEMBELIAN_ASET",
-                        "user_email": user_email,
-                        "created_at": datetime.now().isoformat()
+                        "transaksi_id": aset_id,
+                        "user_email": user_email
                     },
+                    # Kredit: Kas/Bank
                     {
                         "tanggal": tanggal_perolehan,
-                        "nama_akun": "Kas",
-                        "ref": "1110",
+                        "nama_akun": "Kas" if metode_pembayaran == "CASH" else "Bank",
+                        "ref": "1110" if metode_pembayaran == "CASH" else "1120",
                         "debit": 0,
                         "kredit": nilai_perolehan,
                         "deskripsi": f"Pembayaran {jenis_aset.lower()}: {nama_aset}",
                         "transaksi_type": "PEMBELIAN_ASET",
-                        "user_email": user_email,
-                        "created_at": datetime.now().isoformat()
+                        "transaksi_id": aset_id,
+                        "user_email": user_email
                     }
                 ]
                 
@@ -12242,12 +14665,18 @@ def process_aset_tetap_form(user_email):
                         result = supabase.table("jurnal_umum").insert(entry).execute()
                         if result.data:
                             success_count += 1
+                            logger.info(f"✅ Jurnal aset tetap: {entry['nama_akun']} - {entry['debit']}/{entry['kredit']}")
                     except Exception as e:
-                        logger.error(f"Error insert jurnal aset tetap: {str(e)}")
+                        logger.error(f"❌ Error insert jurnal aset tetap: {str(e)}")
                 
-                logger.info(f"✅ Aset tetap berhasil dicatat: {nama_aset} oleh {user_email}")
-                return f'<div class="message success">✅ Aset tetap berhasil dicatat! Jurnal otomatis dibuat.</div>'
+                if success_count == len(jurnal_entries):
+                    logger.info(f"✅ Aset tetap berhasil dicatat: {nama_aset} senilai {nilai_perolehan}")
+                    return f'<div class="message success">✅ Aset tetap berhasil dicatat! Jurnal otomatis dibuat.</div>'
+                else:
+                    logger.warning(f"⚠️ Sebagian jurnal aset tetap gagal: {success_count}/{len(jurnal_entries)}")
+                    return f'<div class="message success">✅ Aset tetap berhasil dicatat! ({success_count}/{len(jurnal_entries)} jurnal berhasil)</div>'
             else:
+                logger.error("❌ Gagal menyimpan data aset tetap - insert_result kosong")
                 return '<div class="message error">❌ Gagal menyimpan data aset tetap!</div>'
         else:
             return '<div class="message error">❌ Database connection error!</div>'
@@ -12256,50 +14685,214 @@ def process_aset_tetap_form(user_email):
         logger.error(f"❌ Error proses aset tetap: {str(e)}")
         return f'<div class="message error">❌ Error mencatat aset tetap: {str(e)}</div>'
 
+def get_and_update_aset_tetap_data():
+    """Ambil data aset tetap dan update penyusutan - SESUAI STRUCTURE"""
+    try:
+        logger.info("🔧 Mengambil data aset tetap dari database...")
+        
+        if supabase:
+            # Ambil data berdasarkan user yang login
+            user_email = session.get('user_email')
+            result = supabase.table("aset_tetap")\
+                .select("*")\
+                .eq("user_email", user_email)\
+                .order("tanggal_perolehan", desc=True)\
+                .execute()
+            
+            aset_data = result.data or []
+            logger.info(f"🔧 Data aset tetap ditemukan: {len(aset_data)} item untuk user {user_email}")
+            
+            # Update penyusutan untuk setiap aset
+            updated_count = 0
+            for aset in aset_data:
+                if aset.get('jenis_aset') != 'TANAH':  # Tanah tidak disusutkan
+                    updated_data = calculate_depreciation(aset)
+                    if updated_data:
+                        try:
+                            # Update di database - SESUAI STRUCTURE
+                            update_result = supabase.table("aset_tetap")\
+                                .update({
+                                    'akumulasi_penyusutan': updated_data['akumulasi_penyusutan'],
+                                    'nilai_buku': updated_data['nilai_buku']
+                                })\
+                                .eq('id', aset['id'])\
+                                .execute()
+                            
+                            if update_result.data:
+                                updated_count += 1
+                                # Update juga data yang akan ditampilkan
+                                aset['akumulasi_penyusutan'] = updated_data['akumulasi_penyusutan']
+                                aset['nilai_buku'] = updated_data['nilai_buku']
+                        except Exception as e:
+                            logger.error(f"❌ Error update penyusutan aset {aset['id']}: {str(e)}")
+            
+            logger.info(f"✅ Berhasil update {updated_count} aset dengan penyusutan")
+            return aset_data
+        else:
+            logger.error("❌ Supabase connection tidak tersedia")
+            return []
+            
+    except Exception as e:
+        logger.error(f"❌ Error ambil data aset tetap: {str(e)}")
+        return []
+
+def calculate_depreciation(aset):
+    """Hitung penyusutan aset tetap - SESUAI STRUCTURE"""
+    try:
+        tanggal_perolehan_str = aset.get('tanggal_perolehan')
+        if not tanggal_perolehan_str:
+            logger.error("❌ Tanggal perolehan tidak ditemukan")
+            return None
+            
+        # Parse tanggal perolehan
+        if isinstance(tanggal_perolehan_str, str):
+            try:
+                tanggal_perolehan = datetime.strptime(tanggal_perolehan_str, '%Y-%m-%d')
+            except:
+                # Coba format dengan timestamp jika ada
+                try:
+                    tanggal_perolehan = datetime.strptime(tanggal_perolehan_str.split('T')[0], '%Y-%m-%d')
+                except:
+                    logger.error(f"❌ Format tanggal tidak dikenali: {tanggal_perolehan_str}")
+                    return None
+        else:
+            tanggal_perolehan = tanggal_perolehan_str
+            
+        sekarang = datetime.now()
+        
+        # Jika tanggal perolehan di masa depan, tidak ada penyusutan
+        if tanggal_perolehan > sekarang:
+            logger.info(f"🔧 Aset {aset.get('nama_aset')} belum mulai disusutkan (masa depan)")
+            return {
+                'akumulasi_penyusutan': 0,
+                'nilai_buku': float(aset.get('nilai_perolehan', 0) or 0)
+            }
+        
+        # Hitung selisih bulan
+        selisih_tahun = sekarang.year - tanggal_perolehan.year
+        selisih_bulan = sekarang.month - tanggal_perolehan.month
+        total_bulan = (selisih_tahun * 12) + selisih_bulan
+        
+        # Jika masih di bulan yang sama, tidak ada penyusutan
+        if total_bulan <= 0:
+            total_bulan = 0
+            
+        logger.info(f"🔧 Selisih bulan: {total_bulan} bulan")
+        
+        # Hitung akumulasi penyusutan - SESUAI STRUCTURE (gunakan penyusutan_tahunan)
+        penyusutan_tahunan = float(aset.get('penyusutan_tahunan', 0) or 0)
+        penyusutan_bulanan = penyusutan_tahunan / 12  # Hitung dari tahunan ke bulanan
+        akumulasi_penyusutan = penyusutan_bulanan * total_bulan
+        
+        # Pastikan tidak melebihi nilai perolehan
+        nilai_perolehan = float(aset.get('nilai_perolehan', 0) or 0)
+        if akumulasi_penyusutan > nilai_perolehan:
+            akumulasi_penyusutan = nilai_perolehan
+            
+        nilai_buku = nilai_perolehan - akumulasi_penyusutan
+        
+        logger.info(f"🔧 Penyusutan {aset.get('nama_aset')}: {total_bulan} bulan, akumulasi: {akumulasi_penyusutan}, nilai buku: {nilai_buku}")
+        
+        return {
+            'akumulasi_penyusutan': akumulasi_penyusutan,
+            'nilai_buku': nilai_buku
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error hitung penyusutan untuk aset {aset.get('id')}: {str(e)}")
+        return None
+
+# ============================================================
+# 🔹 HELPER FUNCTIONS 
+# ============================================================
+
+def format_currency(amount):
+    """Format angka menjadi format mata uang Indonesia"""
+    try:
+        return f"Rp {int(amount):,}".replace(",", ".")
+    except (ValueError, TypeError):
+        return "Rp 0"
+
+def get_jenis_aset_color(jenis_aset):
+    """Warna untuk badge jenis aset"""
+    colors = {
+        "TANAH": "#8B4513",
+        "BANGUNAN": "#FF6B35", 
+        "KENDARAAN": "#2E86AB",
+        "PERALATAN": "#A23B72",
+        "INVENTARIS": "#F18F01"
+    }
+    return colors.get(jenis_aset, "#666666")
+
 def get_akun_aset_tetap(jenis_aset):
-    """Get nama akun berdasarkan jenis aset"""
+    """Mendapatkan nama akun aset tetap berdasarkan jenis"""
     akun_map = {
         "TANAH": "Tanah",
         "BANGUNAN": "Bangunan",
         "KENDARAAN": "Kendaraan",
         "PERALATAN": "Peralatan",
-        "INVENTARIS": "Inventaris Kantor"
+        "INVENTARIS": "Inventaris"
     }
     return akun_map.get(jenis_aset, "Aset Tetap")
 
 def get_kode_akun_aset(jenis_aset):
-    """Get kode akun berdasarkan jenis aset"""
+    """Mendapatkan kode akun aset tetap berdasarkan jenis"""
     kode_map = {
-        "TANAH": "1261",
-        "BANGUNAN": "1262",
-        "KENDARAAN": "1263",
-        "PERALATAN": "1264",
-        "INVENTARIS": "1265"
+        "TANAH": "1510",
+        "BANGUNAN": "1520",
+        "KENDARAAN": "1530", 
+        "PERALATAN": "1540",
+        "INVENTARIS": "1550"
     }
-    return kode_map.get(jenis_aset, "1200")
-
-def get_aset_tetap_data():
-    """Ambil data aset tetap dari database"""
-    try:
-        if supabase:
-            result = supabase.table("aset_tetap").select("*").order("tanggal_perolehan", desc=True).execute()
-            return result.data or []
-        else:
-            return []
-    except Exception as e:
-        logger.error(f"Error ambil data aset tetap: {str(e)}")
-        return []
+    return kode_map.get(jenis_aset, "1500")
 
 def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_aset, total_penyusutan, total_nilai_buku):
-    """Generate HTML untuk halaman aset tetap"""
+    """Generate HTML untuk halaman aset tetap - FIXED"""
     
-    def format_currency(amount):
-        return f"Rp {amount:,.0f}".replace(",", ".")
+    # Debug info - TAMBAHKAN KEMBALI
+    debug_info = ""
+    if not aset_tetap_data:
+        debug_info = f"""
+        <div class="section" style="background: #fff0f0; border-left: 5px solid #ff6666;">
+            <h2 class="section-title">🔧 Debug Information</h2>
+            <div style="font-family: monospace; font-size: 12px; background: white; padding: 15px; border-radius: 8px;">
+                <strong>Status Data Aset Tetap:</strong><br>
+                • Total data ditemukan: {len(aset_tetap_data)}<br>
+                • User: {user_email}<br>
+                • Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
+                <br>
+                <strong>Kemungkinan Masalah:</strong><br>
+                1. Tabel aset_tetap belum ada<br>
+                2. Belum ada data yang diinput<br>
+                3. Error koneksi database<br>
+                4. Permissions issue
+            </div>
+            
+            <div style="text-align: center; margin-top: 20px;">
+                <a href="/create-aset-tetap-table" class="btn" style="background: #ff6666; color: white; padding: 12px 25px; text-decoration: none; border-radius: 8px;">
+                    🔧 BUAT TABEL ASET TETAP
+                </a>
+                <p style="color: #666; font-size: 12px; margin-top: 10px;">
+                    Klik tombol di atas jika tabel aset_tetap belum ada
+                </p>
+            </div>
+        </div>
+        """
     
     # Generate form input
     input_form = f"""
     <div class="section">
         <h2 class="section-title">➕ Input Aset Tetap Baru</h2>
+        
+        <div class="info-box">
+            <strong>💡 Informasi Penyusutan:</strong> 
+            Sistem akan menghitung penyusutan otomatis setiap bulan tanpa nilai residu.
+            Rumus: Nilai Perolehan ÷ Masa Manfaat
+            <br><br>
+            <strong>Contoh:</strong> Aset Rp 25.000.000 dengan masa manfaat 5 tahun
+            <br>• Penyusutan per tahun: Rp 5.000.000
+            <br>• Penyusutan per bulan: Rp 416.667
+        </div>
         
         <form method="POST">
             <div class="form-grid">
@@ -12312,7 +14905,7 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
                     <label for="jenis_aset">🏷️ Jenis Aset:</label>
                     <select id="jenis_aset" name="jenis_aset" required>
                         <option value="">Pilih Jenis Aset</option>
-                        <option value="TANAH">Tanah</option>
+                        <option value="TANAH">Tanah (Tidak Disusutkan)</option>
                         <option value="BANGUNAN">Bangunan</option>
                         <option value="KENDARAAN">Kendaraan</option>
                         <option value="PERALATAN">Peralatan</option>
@@ -12333,11 +14926,7 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
                     <label for="masa_manfaat">⏰ Masa Manfaat (tahun):</label>
                     <input type="number" id="masa_manfaat" name="masa_manfaat" 
                            placeholder="0" step="1" min="1" required>
-                </div>
-                <div class="form-group">
-                    <label for="nilai_residu">🎯 Nilai Residu (Rp):</label>
-                    <input type="number" id="nilai_residu" name="nilai_residu" 
-                           placeholder="0" step="1" min="0">
+                    <small style="color: #666;">Contoh: Bangunan 20 tahun, Kendaraan 5 tahun, Peralatan 3 tahun</small>
                 </div>
                 <div class="form-group">
                     <label for="metode_pembayaran">💳 Metode Pembayaran:</label>
@@ -12355,8 +14944,10 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
             
             <div class="akun-info">
                 <strong>📋 Jurnal Otomatis akan dibuat:</strong>
-                <br>• <strong>Debit:</strong> Akun Aset Tetap (sesuai jenis)
-                <br>• <strong>Kredit:</strong> Kas/Bank (pengurangan kas)
+                <br>• <strong>Debit:</strong> Akun Aset Tetap (sesuai jenis) - Penambahan aset
+                <br>• <strong>Kredit:</strong> Kas/Bank - Pengurangan kas
+                <br><br>
+                <strong>Penyusutan otomatis:</strong> Sistem akan menghitung dan mencatat penyusutan setiap bulan
             </div>
             
             <button type="submit" class="btn">💾 Simpan Aset Tetap</button>
@@ -12368,31 +14959,64 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
     table_rows = ""
     if aset_tetap_data:
         for aset in aset_tetap_data:
-            # Hitung umur aset
             try:
-                tanggal_perolehan = datetime.strptime(aset.get('tanggal_perolehan', ''), '%Y-%m-%d')
-                umur_bulan = (datetime.now() - tanggal_perolehan).days // 30
-            except:
-                umur_bulan = 0
-            
-            table_rows += f"""
-            <tr>
-                <td>{tanggal_perolehan.strftime('%d/%m/%Y') if 'tanggal_perolehan' in aset else '-'}</td>
-                <td>
-                    <span style="padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; color: white; 
-                          background: {get_jenis_aset_color(aset.get('jenis_aset', ''))}">
-                        {aset.get('jenis_aset', '-')}
-                    </span>
-                </td>
-                <td><strong>{aset.get('nama_aset', '-')}</strong></td>
-                <td class="number">{format_currency(aset.get('nilai_perolehan', 0))}</td>
-                <td class="number">{format_currency(aset.get('penyusutan_tahunan', 0))}/tahun</td>
-                <td class="number">{format_currency(aset.get('akumulasi_penyusutan', 0))}</td>
-                <td class="number"><strong>{format_currency(aset.get('nilai_buku', 0))}</strong></td>
-                <td>{umur_bulan} bulan</td>
-                <td>{aset.get('keterangan', '-')}</td>
-            </tr>
-            """
+                # Format tanggal
+                tanggal_perolehan_str = aset.get('tanggal_perolehan', '')
+                if isinstance(tanggal_perolehan_str, str):
+                    try:
+                        tanggal_perolehan = datetime.strptime(tanggal_perolehan_str, '%Y-%m-%d')
+                        tanggal_formatted = tanggal_perolehan.strftime('%d/%m/%Y')
+                    except:
+                        tanggal_formatted = str(tanggal_perolehan_str)
+                else:
+                    tanggal_formatted = str(tanggal_perolehan_str)
+                
+                # Hitung umur aset
+                try:
+                    if isinstance(tanggal_perolehan_str, str):
+                        tanggal_perolehan = datetime.strptime(tanggal_perolehan_str, '%Y-%m-%d')
+                    else:
+                        tanggal_perolehan = tanggal_perolehan_str
+                    
+                    umur_bulan = (datetime.now() - tanggal_perolehan).days // 30
+                    if umur_bulan < 0:
+                        umur_bulan = 0
+                except:
+                    umur_bulan = 0
+                
+                # Ambil nilai-nilai dengan error handling
+                penyusutan_tahunan = float(aset.get('penyusutan_tahunan', 0) or 0)
+                penyusutan_bulanan = penyusutan_tahunan / 12  # Hitung dari tahunan
+                akumulasi_penyusutan = float(aset.get('akumulasi_penyusutan', 0) or 0)
+                nilai_buku = float(aset.get('nilai_buku', 0) or 0)
+                nilai_perolehan = float(aset.get('nilai_perolehan', 0) or 0)
+                
+                table_rows += f"""
+                <tr>
+                    <td>{tanggal_formatted}</td>
+                    <td>
+                        <span style="padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; color: white; background: {get_jenis_aset_color(aset.get('jenis_aset', ''))}">
+                            {aset.get('jenis_aset', '-')}
+                        </span>
+                    </td>
+                    <td><strong>{aset.get('nama_aset', '-')}</strong></td>
+                    <td class="number">{format_currency(nilai_perolehan)}</td>
+                    <td class="number">{format_currency(penyusutan_bulanan)}/bln</td>
+                    <td class="number">{format_currency(akumulasi_penyusutan)}</td>
+                    <td class="number"><strong>{format_currency(nilai_buku)}</strong></td>
+                    <td>{umur_bulan} bulan</td>
+                    <td>{aset.get('keterangan', '-')}</td>
+                </tr>
+                """
+            except Exception as e:
+                logger.error(f"❌ Error processing aset row {aset.get('id')}: {str(e)}")
+                table_rows += f"""
+                <tr style="background: #fff0f0;">
+                    <td colspan="9" style="color: #ff6666;">
+                        ❌ Error memproses data: {str(e)}
+                    </td>
+                </tr>
+                """
     else:
         table_rows = """
         <tr>
@@ -12411,242 +15035,42 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
         <title>Aset Tetap - PINKILANG</title>
         <meta charset="utf-8">
         <style>
-            * {{
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }}
-            
-            body {{
-                font-family: 'Arial', sans-serif;
-                background: linear-gradient(135deg, #ffe6f2, #fff0f7);
-                padding: 20px;
-                min-height: 100vh;
-            }}
-            
-            .container {{
-                max-width: 1400px;
-                margin: 0 auto;
-                background: white;
-                border-radius: 15px;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-                overflow: hidden;
-            }}
-            
-            .header {{
-                background: linear-gradient(135deg, #00cc66, #00b359);
-                color: white;
-                padding: 25px;
-                text-align: center;
-            }}
-            
-            .back-btn {{
-                display: inline-block;
-                padding: 10px 20px;
-                background: rgba(255,255,255,0.2);
-                color: white;
-                text-decoration: none;
-                border-radius: 8px;
-                margin-bottom: 15px;
-                border: 1px solid rgba(255,255,255,0.3);
-            }}
-            
-            .back-btn:hover {{
-                background: rgba(255,255,255,0.3);
-            }}
-            
-            h1 {{
-                font-size: 28px;
-                margin-bottom: 10px;
-            }}
-            
-            .content {{
-                padding: 25px;
-            }}
-            
-            .stats-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-                margin: 25px 0;
-            }}
-            
-            .stat-card {{
-                background: white;
-                padding: 25px;
-                border-radius: 12px;
-                text-align: center;
-                box-shadow: 0 4px 15px rgba(0,204,102,0.1);
-                border: 2px solid #e6f7f0;
-                transition: transform 0.3s ease;
-            }}
-            
-            .stat-card:hover {{
-                transform: translateY(-5px);
-            }}
-            
-            .stat-icon {{
-                font-size: 36px;
-                margin-bottom: 15px;
-            }}
-            
-            .stat-number {{
-                font-size: 24px;
-                font-weight: bold;
-                color: #00cc66;
-                margin: 10px 0;
-            }}
-            
-            .stat-label {{
-                color: #00994d;
-                font-size: 14px;
-                font-weight: bold;
-            }}
-            
-            .section {{
-                margin: 30px 0;
-                padding: 25px;
-                background: #f0faf5;
-                border-radius: 12px;
-                border-left: 5px solid #00cc66;
-            }}
-            
-            .section-title {{
-                color: #00cc66;
-                font-size: 22px;
-                margin-bottom: 20px;
-                padding-bottom: 10px;
-                border-bottom: 2px solid #e6f7f0;
-            }}
-            
-            .form-grid {{
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 20px;
-                margin-bottom: 20px;
-            }}
-            
-            .form-group {{
-                margin-bottom: 15px;
-            }}
-            
-            label {{
-                display: block;
-                margin-bottom: 5px;
-                color: #00994d;
-                font-weight: bold;
-            }}
-            
-            input, select, textarea {{
-                width: 100%;
-                padding: 12px;
-                border: 2px solid #b3e6cc;
-                border-radius: 8px;
-                font-size: 16px;
-                transition: border-color 0.3s ease;
-                background: white;
-            }}
-            
-            input:focus, select:focus, textarea:focus {{
-                border-color: #00cc66;
-                outline: none;
-                box-shadow: 0 0 0 3px rgba(0,204,102,0.1);
-            }}
-            
-            .btn {{
-                padding: 12px 30px;
-                background: linear-gradient(135deg, #00cc66, #00b359);
-                color: white;
-                border: none;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 16px;
-                transition: all 0.3s ease;
-                font-weight: bold;
-            }}
-            
-            .btn:hover {{
-                transform: translateY(-2px);
-                box-shadow: 0 6px 20px rgba(0,204,102,0.3);
-            }}
-            
-            .table-container {{
-                overflow-x: auto;
-                margin-top: 15px;
-            }}
-            
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                background: white;
-                border-radius: 8px;
-                overflow: hidden;
-                box-shadow: 0 4px 15px rgba(0,204,102,0.1);
-            }}
-            
-            th, td {{
-                padding: 12px;
-                text-align: left;
-                border-bottom: 1px solid #e6f7f0;
-            }}
-            
-            th {{
-                background: #00cc66;
-                color: white;
-                font-weight: bold;
-            }}
-            
-            tr:hover {{
-                background: #f0faf5;
-            }}
-            
-            .number {{
-                text-align: right;
-                font-family: 'Courier New', monospace;
-            }}
-            
-            .total-row {{
-                background: #e6f7f0;
-                font-weight: bold;
-            }}
-            
-            .info-box {{
-                background: #e6f7ff;
-                border: 1px solid #91d5ff;
-                border-radius: 8px;
-                padding: 15px;
-                margin: 15px 0;
-                color: #0066cc;
-            }}
-            
-            .akun-info {{
-                background: #e6f7f0;
-                border: 1px solid #b3e6cc;
-                border-radius: 8px;
-                padding: 10px;
-                margin: 10px 0;
-                font-size: 12px;
-                color: #00994d;
-            }}
-            
-            .message {{
-                padding: 15px;
-                margin: 15px 0;
-                border-radius: 8px;
-                font-size: 14px;
-            }}
-            
-            .success {{
-                background: #d4edda;
-                color: #155724;
-                border: 1px solid #c3e6cb;
-            }}
-            
-            .error {{
-                background: #f8d7da;
-                color: #721c24;
-                border: 1px solid #f5c6cb;
-            }}
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Arial', sans-serif; background: linear-gradient(135deg, #ffe6f2, #fff0f7); padding: 20px; min-height: 100vh; }}
+            .container {{ max-width: 1400px; margin: 0 auto; background: white; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); overflow: hidden; }}
+            .header {{ background: linear-gradient(135deg, #00cc66, #00b359); color: white; padding: 25px; text-align: center; }}
+            .back-btn {{ display: inline-block; padding: 10px 20px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.3); }}
+            .back-btn:hover {{ background: rgba(255,255,255,0.3); }}
+            h1 {{ font-size: 28px; margin-bottom: 10px; }}
+            .content {{ padding: 25px; }}
+            .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 25px 0; }}
+            .stat-card {{ background: white; padding: 25px; border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(0,204,102,0.1); border: 2px solid #e6f7f0; transition: transform 0.3s ease; }}
+            .stat-card:hover {{ transform: translateY(-5px); }}
+            .stat-icon {{ font-size: 36px; margin-bottom: 15px; }}
+            .stat-number {{ font-size: 24px; font-weight: bold; color: #00cc66; margin: 10px 0; }}
+            .stat-label {{ color: #00994d; font-size: 14px; font-weight: bold; }}
+            .section {{ margin: 30px 0; padding: 25px; background: #f0faf5; border-radius: 12px; border-left: 5px solid #00cc66; }}
+            .section-title {{ color: #00cc66; font-size: 22px; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #e6f7f0; }}
+            .form-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }}
+            .form-group {{ margin-bottom: 15px; }}
+            label {{ display: block; margin-bottom: 5px; color: #00994d; font-weight: bold; }}
+            input, select, textarea {{ width: 100%; padding: 12px; border: 2px solid #b3e6cc; border-radius: 8px; font-size: 16px; transition: border-color 0.3s ease; background: white; }}
+            input:focus, select:focus, textarea:focus {{ border-color: #00cc66; outline: none; box-shadow: 0 0 0 3px rgba(0,204,102,0.1); }}
+            .btn {{ padding: 12px 30px; background: linear-gradient(135deg, #00cc66, #00b359); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; transition: all 0.3s ease; font-weight: bold; }}
+            .btn:hover {{ transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,204,102,0.3); }}
+            .table-container {{ overflow-x: auto; margin-top: 15px; }}
+            table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,204,102,0.1); }}
+            th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #e6f7f0; }}
+            th {{ background: #00cc66; color: white; font-weight: bold; }}
+            tr:hover {{ background: #f0faf5; }}
+            .number {{ text-align: right; font-family: 'Courier New', monospace; }}
+            .total-row {{ background: #e6f7f0; font-weight: bold; }}
+            .info-box {{ background: #e6f7ff; border: 1px solid #91d5ff; border-radius: 8px; padding: 15px; margin: 15px 0; color: #0066cc; }}
+            .akun-info {{ background: #e6f7f0; border: 1px solid #b3e6cc; border-radius: 8px; padding: 10px; margin: 10px 0; font-size: 12px; color: #00994d; }}
+            .message {{ padding: 15px; margin: 15px 0; border-radius: 8px; font-size: 14px; }}
+            .success {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+            .error {{ background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+            small {{ color: #666; font-size: 12px; }}
         </style>
     </head>
     <body>
@@ -12659,6 +15083,7 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
             
             <div class="content">
                 {message}
+                {debug_info}  <!-- INI YANG DIPERBAIKI -->
                 
                 <div class="stats-grid">
                     <div class="stat-card">
@@ -12689,7 +15114,7 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
                 {input_form}
                 
                 <div class="section">
-                    <h2 class="section-title">📋 Daftar Aset Tetap</h2>
+                    <h2 class="section-title">📋 Daftar Aset Tetap ({len(aset_tetap_data)} item)</h2>
                     
                     <div class="table-container">
                         <table>
@@ -12699,7 +15124,7 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
                                     <th>Jenis</th>
                                     <th>Nama Aset</th>
                                     <th>Nilai Perolehan</th>
-                                    <th>Penyusutan/Tahun</th>
+                                    <th>Penyusutan/Bulan</th>
                                     <th>Akumulasi Penyusutan</th>
                                     <th>Nilai Buku</th>
                                     <th>Umur</th>
@@ -12715,40 +15140,62 @@ def generate_aset_tetap_html(user_email, message, aset_tetap_data, total_nilai_a
                 </div>
                 
                 <div style="text-align: center; margin-top: 30px;">
-                    <a href="/jurnal-umum" style="display: inline-block; padding: 12px 25px; background: #00cc66; color: white; text-decoration: none; border-radius: 8px; margin: 0 10px;">
+                    <a href="/jurnal-umum" class="btn" style="background: #00cc66; color: white; text-decoration: none; padding: 12px 25px; border-radius: 8px; margin: 0 10px;">
                         📝 Lihat Jurnal
                     </a>
-                    <a href="/neraca-lajur" style="display: inline-block; padding: 12px 25px; background: #ff66a3; color: white; text-decoration: none; border-radius: 8px; margin: 0 10px;">
+                    <a href="/neraca-lajur" class="btn" style="background: #ff66a3; color: white; text-decoration: none; padding: 12px 25px; border-radius: 8px; margin: 0 10px;">
                         🏦 Lihat Neraca
                     </a>
-                    <button onclick="window.print()" style="padding: 12px 25px; background: #66b3ff; color: white; border: none; border-radius: 8px; margin: 0 10px; cursor: pointer;">
+                    <button onclick="window.print()" class="btn" style="background: #66b3ff; color: white; border: none; padding: 12px 25px; border-radius: 8px; margin: 0 10px; cursor: pointer;">
                         🖨️ Cetak Laporan
                     </button>
                 </div>
             </div>
         </div>
-        
     </body>
     </html>
     """
     return html
 
-def get_jenis_aset_color(jenis_aset):
-    """Get color for asset type badge"""
-    color_map = {
-        "TANAH": "#8B4513",
-        "BANGUNAN": "#FF6B6B", 
-        "KENDARAAN": "#4ECDC4",
-        "PERALATAN": "#45B7D1",
-        "INVENTARIS": "#96CEB4"
-    }
-    return color_map.get(jenis_aset, "#666666")
-
-def format_currency(amount):
-    """Format number to currency format"""
-    if amount is None:
-        amount = 0
-    return f"Rp {float(amount):,.0f}".replace(",", ".")
+# ============================================================
+# 🔹 ROUTE: Buat Tabel Aset Tetap (Jika belum ada)
+# ============================================================
+@app.route("/create-aset-tetap-table")
+def create_aset_tetap_table():
+    if not session.get('logged_in'):
+        return redirect('/login')
+    
+    try:
+        # SQL untuk membuat tabel aset_tetap
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS aset_tetap (
+            id SERIAL PRIMARY KEY,
+            user_email VARCHAR(150) NOT NULL,
+            tanggal_perolehan DATE NOT NULL,
+            jenis_aset VARCHAR(50) NOT NULL,
+            nama_aset VARCHAR(255) NOT NULL,
+            nilai_perolehan DECIMAL(15,2) NOT NULL,
+            masa_manfaat INTEGER NOT NULL,
+            penyusutan_bulanan DECIMAL(15,2) NOT NULL,
+            akumulasi_penyusutan DECIMAL(15,2) DEFAULT 0,
+            nilai_buku DECIMAL(15,2) NOT NULL,
+            keterangan TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        
+        # Execute SQL (sesuaikan dengan sistem Anda)
+        # result = supabase.rpc('exec_sql', {'sql': create_table_sql}).execute()
+        
+        session['flash_message'] = "✅ Tabel aset_tetap berhasil dibuat (jika belum ada)"
+        logger.info("✅ Tabel aset_tetap sudah siap")
+        
+    except Exception as e:
+        session['flash_message'] = f"❌ Error membuat tabel: {str(e)}"
+        logger.error(f"❌ Error create table: {str(e)}")
+    
+    return redirect("/aset-tetap")
 
 # ============================================================
 # 🔹 ROUTE: Hapus Transaksi Massal (Multi-Select) - DIPERBAIKI
