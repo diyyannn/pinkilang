@@ -9338,7 +9338,7 @@ def create_error_page(title, message):
     """
 
 # ============================================================
-# 🔹 ROUTE: Neraca Saldo Setelah Penyesuaian (NSSP) - DIPERBAIKI
+# 🔹 ROUTE: Neraca Saldo Setelah Penyesuaian (NSSP) 
 # ============================================================
 @app.route("/neraca-saldo-setelah-penyesuaian")
 def neraca_saldo_setelah_penyesuaian():
@@ -9352,7 +9352,7 @@ def neraca_saldo_setelah_penyesuaian():
         jurnal_result = supabase.table("jurnal_umum").select("*").order("tanggal").execute()
         jurnal_data = jurnal_result.data or []
         
-        # Filter: hapus Utang Beban 750k dan Beban Listrik, Air dan Telepon 750k
+        # Filter: hapus Utang Beban dan Beban Listrik, Air dan Telepon 
         jurnal_data = filter_akun_tidak_diinginkan(jurnal_data)
         
         # Kelompokkan per akun dan hitung saldo
@@ -9804,7 +9804,7 @@ def neraca_saldo_setelah_penyesuaian():
         """
 
 # ============================================================
-# 🔹 FUNGSI BANTUAN - HARUS DITARUH DI ATAS SEBELUM ROUTE
+# 🔹 FUNGSI BANTUAN 
 # ============================================================
 
 def filter_akun_tidak_diinginkan(jurnal_data):
@@ -9898,7 +9898,7 @@ def hitung_laba_bersih_otomatis():
         return 0
 
 # ============================================================
-# 🔹 FUNGSI BANTU ARUS KAS - FIXED VERSION
+# 🔹 FUNGSI BANTU ARUS KAS 
 # ============================================================
 
 def hitung_arus_kas_fixed():
