@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 import resend
 import requests
 
-
+#terbaru
 # ============================================================
 # 🔹 Setup Logging
 # ============================================================
