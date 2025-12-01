@@ -211,7 +211,7 @@ def home():
         current_detail = f"Koneksi terputus: {str(e)}"
 
     # Cek path yang sederhana
-    logo_path = 'static/pinkilang_logo.png'
+    logo_path = 'static/pinkilang_logo.PNG'
     logo_exists = os.path.exists(logo_path)
     
     print(f"🔍 Checking logo at: {os.path.abspath(logo_path)}")
@@ -220,7 +220,7 @@ def home():
     # Jika tidak ada, coba path alternatif
     if not logo_exists:
         # Coba path dengan backslash untuk Windows
-        logo_path_win = 'statice\\pinkilang_logo.png'
+        logo_path_win = 'statice\\pinkilang_logo.PNG'
         logo_exists = os.path.exists(logo_path_win)
         print(f"🔍 Checking Windows path: {os.path.abspath(logo_path_win)}")
         print(f"📁 Logo exists (Windows path): {logo_exists}")
@@ -230,7 +230,7 @@ def home():
         <!-- Logo Pinkilang di Tengah -->
         <div style="margin-bottom: 40px;">
             {f'''
-            <img src="/static/pinkilang_logo.png" 
+            <img src="/static/pinkilang_logo.PNG" 
                  alt="PINKILANG" 
                  style="max-width: 150px; width: 100%; height: auto; display: block; margin: 0 auto;">
             
