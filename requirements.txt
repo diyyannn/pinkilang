@@ -1,2 +1,6 @@
-flask
+Flask
 gunicorn
+supabase
+python-dotenv
+requests
+resend
