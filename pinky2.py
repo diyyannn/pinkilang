@@ -8,6 +8,9 @@ import smtplib
 import random
 import os
 from decimal import Decimal, InvalidOperation
+import resend
+import requests
+
 
 # ============================================================
 # 🔹 Setup Logging
@@ -21,14 +24,14 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_SENDER   = os.getenv("EMAIL_SENDER") 
 
 print("🔧 Configuration loaded:")
 print(f"   SUPABASE_URL: {SUPABASE_URL}")
 print(f"   SUPABASE_KEY: {SUPABASE_KEY[:20] + '...' if SUPABASE_KEY else 'NOT SET'}")
-print(f"   EMAIL_SENDER: {EMAIL_SENDER}")
-print(f"   EMAIL_PASSWORD: {'✅ SET' if EMAIL_PASSWORD else '❌ NOT SET'}")
+print(f"   RESEND_API_KEY: {RESEND_API_KEY[:15]}..." if RESEND_API_KEY else "  RESEND_API_KEY: NOT SET")
+print(f"   EMAIL_SENDER  : {EMAIL_SENDER}")
 
 # ============================================================
 # 🔹 Inisialisasi Flask & Supabase 
@@ -73,36 +76,37 @@ except Exception as e:
 # ============================================================
 def send_email(recipient, subject, body):
     try:
-        if not EMAIL_SENDER or not EMAIL_PASSWORD:
-            logger.error("❌ Konfigurasi email tidak lengkap")
+        if not RESEND_API_KEY or not EMAIL_SENDER:
+            logger.error("❌ Konfigurasi Resend tidak lengkap")
             return False
 
-        msg = EmailMessage()
-        msg["From"] = EMAIL_SENDER
-        msg["To"] = recipient
-        msg["Subject"] = subject
-        msg.set_content(body)
+        url = "https://api.resend.com/emails"
+
+        payload = {
+            "from": EMAIL_SENDER,
+            "to": recipient,
+            "subject": subject,
+            "text": body
+        }
+
+        headers = {
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
         logger.info(f"📧 Mengirim email ke: {recipient}")
 
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        
-        logger.info(f"✅ Email berhasil dikirim ke: {recipient}")
-        return True
-        
-    except smtplib.SMTPAuthenticationError:
-        logger.error("❌ Gagal autentikasi Gmail. Pastikan:")
-        logger.error("1. Menggunakan App Password, bukan password biasa")
-        logger.error("2. App Password 16 karakter tanpa spasi")
-        logger.error("3. 2FA diaktifkan di akun Gmail")
-        return False
+        response = requests.post(url, json=payload, headers=headers)
+
+        if response.status_code == 200:
+            logger.info(f"✅ Email berhasil dikirim ke: {recipient}")
+            return True
+        else:
+            logger.error(f"❌ Gagal kirim email: {response.text}")
+            return False
+
     except Exception as e:
-        logger.error(f"❌ Error mengirim email: {e}")
+        logger.error(f"❌ Error send_email: {str(e)}")
         return False
         
 # ============================================================
