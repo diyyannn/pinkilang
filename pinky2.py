@@ -1105,7 +1105,7 @@ AKUN_BEBAN_OPERASIONAL = "Beban Operasional"
 AKUN_BEBAN_PENYUSUTAN = "Beban Penyusutan"
 
 # ============================================================
-# 🎀 FUNGSI JURNAL UMUM 
+# 🎀 FUNGSI JURNAL UMUM PINKILANG
 # ============================================================
 
 def create_journal_entries(transaksi_type, data, user_email):
