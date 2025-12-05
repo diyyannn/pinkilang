@@ -4,7 +4,6 @@ from email.message import EmailMessage
 from dotenv import load_dotenv
 from datetime import datetime, date, timedelta
 import logging
-import smtplib
 import random
 import os
 from decimal import Decimal, InvalidOperation
