@@ -3920,54 +3920,37 @@ def neraca_saldo():
 
     # ambil data dari supabase; aman terhadap method order yang berbeda
     try:
-        try:
-            res = supabase.table("jurnal_umum").select("*").order("tanggal", asc=True).execute()
-        except Exception:
-            # fallback bila client tidak mengenali asc param
-            res = supabase.table("jurnal_umum").select("*").order("tanggal", desc=False).execute()
-        jurnal_data = res.data or []
-    except NameError:
-        return "Supabase client not initialized (variable `supabase` not found).", 500
+        ju_res = supabase.table("jurnal_umum").select("*").execute()
+        jp_res = supabase.table("jurnal_penyesuaian").select("*").execute()
+        jurnal_umum = ju_res.data or []
+        jurnal_penyesuaian = jp_res.data or []
+        jurnal_data = jurnal_umum + jurnal_penyesuaian
     except Exception as e:
-        # tampilkan pesan singkat di browser agar mudah debug di lingkungan development
-        logger.error(f"Error saat load jurnal: {e}")
+        logger.error(f"Error load jurnal: {e}")
         return f"Error load jurnal: {str(e)}", 500
-
-    # group per akun dan hitung total debit/kredit
+    
     saldo_akun = {}
-
     for row in jurnal_data:
-        akun = row.get("nama_akun") or "UNKNOWN"
+        akun = row.get("nama_akun")
+        if not akun:
+            continue  # skip jika NULL
+
+        debit = Decimal(str(row.get("debit", 0) or 0))
+        kredit = Decimal(str(row.get("kredit", 0) or 0))
 
         if akun not in saldo_akun:
             saldo_akun[akun] = {"debit": Decimal("0"), "kredit": Decimal("0")}
+        saldo_akun[akun]["debit"] += debit
+        saldo_akun[akun]["kredit"] += kredit
 
-        # ambil nilai debit/kredit aman
-        raw_d = row.get("debit", 0) or 0
-        raw_k = row.get("kredit", 0) or 0
-
-        try:
-            d = Decimal(str(raw_d))
-        except Exception:
-            d = Decimal("0")
-
-        try:
-            k = Decimal(str(raw_k))
-        except Exception:
-            k = Decimal("0")
-
-        saldo_akun[akun]["debit"] += d
-        saldo_akun[akun]["kredit"] += k
-
-    # helper format rupiah
+    # 4️⃣ Helper format rupiah
     def rp(v):
         try:
-            # v bisa Decimal
             return f"Rp {int(v):,}".replace(",", ".")
         except Exception:
             return "Rp 0"
 
-    # generate rows
+    # 5️⃣ Generate HTML rows
     rows_html = ""
     total_debit = Decimal("0")
     total_kredit = Decimal("0")
@@ -3986,8 +3969,17 @@ def neraca_saldo():
         </tr>
         """
 
+    # 6️⃣ Tambahkan baris total
+    rows_html += f"""
+    <tr class="total">
+        <td><strong>Total</strong></td>
+        <td class="debit"><strong>{rp(total_debit)}</strong></td>
+        <td class="kredit"><strong>{rp(total_kredit)}</strong></td>
+    </tr>
+    """
+
     # render page
-        html = f"""
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -4380,7 +4372,6 @@ def neraca_saldo():
     </html>
     """
     return html
-from datetime import datetime  # pastikan ini ada di atas file
 
 def format_currency(amount):
     """Helper global untuk format Rupiah (dipakai di beberapa fungsi)."""
@@ -4390,7 +4381,7 @@ def format_currency(amount):
         return f"Rp {amount}"
 
 # ================================
-# 🔄 ROUTE: Jurnal Penyesuaian (FIXED untuk SQL Struktur)
+# 🔄 ROUTE: Jurnal Penyesuaian 
 # ================================
 @app.route("/jurnal-penyesuaian", methods=["GET", "POST"])
 def jurnal_penyesuaian():
@@ -4440,6 +4431,57 @@ def process_penyesuaian_manual(user_email):
         if akun_debit == akun_kredit:
             return '<div class="message error">❌ Akun debit dan kredit tidak boleh sama!</div>'
         
+        def get_kode_akun(nama_akun):
+            if not nama_akun:
+                print("ERROR: Nama akun kosong!")
+                return "0000"
+            nama_akun_clean = nama_akun.strip().lower()
+            kode_map = {
+                # Aset Lancar
+                "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+                "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+                "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+                "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+
+                # Aset Tetap
+                "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
+                "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+
+                # Utang
+                "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
+                "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
+
+                # Modal
+                "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
+                "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
+                "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
+
+                # Pendapatan
+                "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
+
+                # HPP
+                "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "kredit"},
+                "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
+
+                # Beban Operasional
+                "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
+                "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
+                "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
+                "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
+            }
+            
+            for kode, info in kode_map.items():
+                if info['nama'].lower() == nama_akun_clean:
+                    return kode
+            
+            # Tidak ketemu
+            print(f"ERROR: Nama akun tidak valid -> '{nama_akun}'")
+            return "0000"
+        
         # Get kode akun
         kode_debit = get_kode_akun(akun_debit)
         kode_kredit = get_kode_akun(akun_kredit)
@@ -4485,50 +4527,88 @@ def process_penyesuaian_manual(user_email):
         except:
             pass  # Skip jika cek gagal
         
-        # Simpan ke database dengan error handling
+        # =========================
+        # Simpan Jurnal Penyesuaian → JU → GL → Neraca Saldo
+        # =========================
         try:
-            # Insert kedua entri sekaligus
-            results = []
+            results_jp, results_ju, results_gl, results_ns = [], [], [], []
+
+            # 1️⃣ Insert ke Jurnal Penyesuaian
             for entry in jurnal_entries:
-                result = supabase.table("jurnal_penyesuaian").insert(entry).execute()
-                results.append(result)
-            
-            # Cek hasil insert
-            if all([r.data for r in results]):
-                logger.info(f"✅ Jurnal penyesuaian berhasil: {keterangan} - Rp {jumlah}")
-                return f'<div class="message success">✅ Penyesuaian manual berhasil dicatat! (Debit: {akun_debit}, Kredit: {akun_kredit})</div>'
-            else:
-                return '<div class="message error">❌ Gagal menyimpan salah satu entri jurnal!</div>'
-                
-        except Exception as e:
-            error_msg = str(e)
-            
-            # Jika error karena kolom created_by, coba tanpa kolom tersebut
-            if "created_by" in error_msg.lower() or "pgrst204" in error_msg.lower():
-                logger.warning("Kolom created_by error, mencoba insert tanpa created_by")
-                
                 try:
-                    # Hapus created_by dari entri
-                    for entry in jurnal_entries:
-                        if "created_by" in entry:
-                            del entry["created_by"]
-                    
-                    # Insert tanpa created_by
-                    results = []
-                    for entry in jurnal_entries:
-                        result = supabase.table("jurnal_penyesuaian").insert(entry).execute()
-                        results.append(result)
-                    
-                    if all([r.data for r in results]):
-                        logger.info(f"✅ Jurnal penyesuaian berhasil (tanpa created_by): {keterangan}")
-                        return f'<div class="message success">✅ Penyesuaian berhasil dicatat!</div>'
+                    r = supabase.table("jurnal_penyesuaian").insert(entry).execute()
+                    results_jp.append(r)
+                except Exception as e:
+                    # Jika error karena created_by, coba tanpa kolom tersebut
+                    if "created_by" in str(e).lower() or "pgrst204" in str(e).lower():
+                        entry_copy = entry.copy()
+                        entry_copy.pop("created_by", None)
+                        r = supabase.table("jurnal_penyesuaian").insert(entry_copy).execute()
+                        results_jp.append(r)
                     else:
-                        return '<div class="message error">❌ Gagal menyimpan jurnal!</div>'
-                        
-                except Exception as e2:
-                    return f'<div class="message error">❌ Error sistem: {str(e2)}</div>'
-            else:
-                return f'<div class="message error">❌ Error sistem: {str(e)}</div>'
+                        raise e
+
+            if not all([r.data for r in results_jp]):
+                return '<div class="message error">❌ Gagal menyimpan salah satu entri JP!</div>'
+
+            logger.info(f"✅ Jurnal Penyesuaian berhasil: {keterangan} - Rp {jumlah}")
+
+            
+            # 3️⃣ Update / Insert ke Buku Besar (GL)
+            for entry in jurnal_entries:
+                kode_akun = entry["ref"]
+                debit = entry["debit"]
+                kredit = entry["kredit"]
+
+                gl_res = supabase.table("buku_besar")\
+                    .select("*")\
+                    .eq("kode_akun", kode_akun)\
+                    .order("tanggal", desc=True)\
+                    .limit(1).execute()
+
+                last_saldo = gl_res.data[0]["saldo"] if gl_res.data else 0
+                # Asumsi normal balance debit
+                new_saldo = last_saldo + debit - kredit
+
+                r_gl = supabase.table("buku_besar").insert({
+                    "tanggal": entry["tanggal"],
+                    "kode_akun": kode_akun,
+                    "debit": debit,
+                    "kredit": kredit,
+                    "saldo": new_saldo,
+                    "deskripsi": entry["deskripsi"]
+                }).execute()
+                results_gl.append(r_gl)
+                if r_gl.data:
+                    logger.warning(f"⚠️ Gagal insert ke Buku Besar: {r_gl.data}")
+
+            if not all([r.data for r in results_gl]):
+                return '<div class="message error">❌ Gagal update salah satu entri Buku Besar!</div>'
+
+            # 4️⃣ Update Neraca Saldo
+            akun_terlibat = set([e["ref"] for e in jurnal_entries])
+            for kode_akun in akun_terlibat:
+                gl_res = supabase.table("buku_besar")\
+                    .select("*")\
+                    .eq("kode_akun", kode_akun)\
+                    .order("tanggal", desc=True)\
+                    .limit(1).execute()
+                saldo_akhir = gl_res.data[0]["saldo"] if gl_res.data else 0
+
+                r_ns = supabase.table("neraca_saldo").upsert({
+                    "kode_akun": kode_akun,
+                    "saldo": saldo_akhir
+                }, on_conflict="kode_akun").execute()
+                results_ns.append(r_ns)
+                if r_ns.data:
+                    logger.warning(f"⚠️ Gagal update Neraca Saldo: {r_ns.data}")
+
+            return f'<div class="message success">✅ JP, JU, GL, dan Neraca Saldo berhasil dicatat! (Debit: {akun_debit}, Kredit: {akun_kredit})</div>'
+
+        except Exception as e:
+            logger.error(f"❌ Error proses jurnal penyesuaian: {str(e)}")
+            return f'<div class="message error">❌ Error sistem: {str(e)}</div>'
+
             
     except Exception as e:
         logger.error(f"❌ Error proses penyesuaian manual: {str(e)}")
@@ -4577,49 +4657,6 @@ def create_table_if_not_exists():
     except:
         logger.warning("Tabel jurnal_penyesuaian belum ada, silakan buat manual di SQL Editor")
         return False
-
-
-def get_kode_akun(nama_akun):
-    """Get kode akun berdasarkan nama akun - EXPANDED"""
-    kode_map = {
-        # Aset Lancar
-    "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-    "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-    "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-    "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-
-    # Aset Tetap
-    "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
-    "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-    "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-    "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-    "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-    "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-
-    # Utang
-    "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
-    "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
-    
-    # Modal
-    "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
-    "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
-    "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
-
-    # Pendapatan
-    "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
-
-    # HPP
-    "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "kredit"},
-    "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
-
-    # Beban Operasional
-    "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
-    "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
-    "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
-    "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
-    }
-    return kode_map.get(nama_akun, "0000")
-
 
 def format_currency(amount):
     """Format currency untuk display"""
@@ -5062,7 +5099,7 @@ def generate_jurnal_penyesuaian_html(user_email, message, jurnal_data, total_deb
                                         <option value="Perlengkapan">Perlengkapan</option>
                                         <option value="Persediaan Barang Dagang">Persediaan Barang Dagang</option>
                                         <option value="Penjualan">Penjualan</option>
-                                        <option value="Pendapatan Jasa">Pendapatan Jasa</option>
+                                        <<option value="HPP">Harga Pokok Penjualan (HPP)</option>
                                     </optgroup>
                                     <optgroup label="Modal">
                                         <option value="Modal">Modal</option>
