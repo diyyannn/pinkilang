@@ -9,6 +9,7 @@ import os
 from decimal import Decimal, InvalidOperation
 import resend
 import requests
+import httpx
 
 # ============================================================
 # 🔹 Setup Logging
@@ -50,15 +51,14 @@ try:
     else:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         print("✅ Supabase client initialized")
-        
         # Test koneksi dengan cara yang lebih aman
-        try:
+    try:
             # Coba akses tabel user
             test_result = supabase.table("user").select("id").limit(1).execute()
             print(f"✅ Tabel user terhubung: {len(test_result.data)} data")
             db_status = "✅ Terhubung"
             db_detail = f"Tabel user siap ({len(test_result.data)} data)"
-        except Exception as table_error:
+    except Exception as table_error:
             print(f"⚠️  Tabel user mungkin belum ada: {table_error}")
             db_status = "✅ Terhubung"
             db_detail = "Koneksi berhasil, tabel mungkin belum ada"
@@ -1065,7 +1065,7 @@ CHART_OF_ACCOUNTS = {
     "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
 
     # Aset Tetap
-    "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+    "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
     "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
     "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
     "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
@@ -1104,12 +1104,12 @@ AKUN_BEBAN_OPERASIONAL = "Beban Operasional"
 AKUN_BEBAN_PENYUSUTAN = "Beban Penyusutan"
 
 # ============================================================
-# 🎀 FUNGSI JURNAL UMUM PINKILANG
+# 🎀 FUNGSI JURNAL UMUM PINKILANG - DISESUAIKAN DENGAN SQL
 # ============================================================
 
 def create_journal_entries(transaksi_type, data, user_email):
     """
-    🎀 FUNGSI JURNAL - COMPATIBLE WITH EXISTING DATABASE STRUCTURE
+    🎀 FUNGSI JURNAL - COMPATIBLE WITH EXISTING SQL DATABASE STRUCTURE
     """
     try:
         if not supabase:
@@ -1124,13 +1124,26 @@ def create_journal_entries(transaksi_type, data, user_email):
         tanggal = data.get('tanggal', datetime.now().strftime('%Y-%m-%d'))
         transaksi_id = str(data.get('transaksi_id', '')).strip()
         
-        if not transaksi_id or transaksi_id.lower() == 'none':
+        tid = str(transaksi_id or "").strip().lower()
+
+        if tid == "" or tid == "none":
             logger.error(f"❌ transaksi_id tidak valid: {transaksi_id}")
             return False
-            
+
         entries = []
         
         logger.info(f"🔄 Membuat jurnal untuk {transaksi_type} ID: {transaksi_id}")
+        
+        # GENERATE UNIQUE REF_ID
+        try:
+            # Ambil ref_id terakhir dari transaksi ini
+            result = supabase.table("jurnal_umum").select("ref_id").eq("transaksi_type", transaksi_type).order("ref_id", desc=True).limit(1).execute()
+            if result.data and result.data[0].get('ref_id'):
+                ref_id = result.data[0]['ref_id'] + 1
+            else:
+                ref_id = 1
+        except:
+            ref_id = 1
         
         if transaksi_type == "PENJUALAN":
             total_penjualan = float(data.get('total_penjualan', 0) or data.get('total', 0) or 0)
@@ -1146,90 +1159,135 @@ def create_journal_entries(transaksi_type, data, user_email):
                 logger.error("❌ Total penjualan harus > 0")
                 return False
             
-            # JURNAL UTAMA - SESUAI STRUCTURE SQL
+            deskripsi_text = f"Penjualan {nama_barang} {jumlah} unit kepada {nama_pelanggan}"
+            
+            # Tentukan akun berdasarkan metode pembayaran
             if metode_bayar.upper() == 'CASH':
+                # PENJUALAN TUNAI
+                # 1. Debit: Kas (1110)
                 entries.append({
                     "tanggal": tanggal,
-                    "nama_akun": "Kas",
-                    "akun_debit": "Kas", 
-                    "akun_kredit": "Penjualan",
-                    "ref": "1110",
-                    "ref_id": f"PENJUALAN_{transaksi_id}",
-                    "jumlah": total_penjualan,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1110",  # NAMA akun debit
+                    "akun_kredit": "4110",  # NAMA akun kredit
                     "debit": total_penjualan, 
                     "kredit": 0,
-                    "keterangan": f"Penjualan tunai {nama_barang} {jumlah} unit kepada {nama_pelanggan}",
-                    "transaksi_type": "PENJUALAN",
+                    "jumlah": total_penjualan,
+                    "nama_akun": "Kas",  # Nama akun untuk entry ini
+                    "akun": "1110",  # KODE akun untuk entry ini
+                    "jenis": "DEBIT",
+                    "transaksi_type": "PENJUALAN_TUNAI" if metode_bayar.upper() == 'CASH' else "PENJUALAN_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "1110",  # Kode akun referensi
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
+                
+                # 2. Kredit: Penjualan (4110)
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1110",
+                    "akun_kredit": "4110",
+                    "debit": 0,
+                    "kredit": total_penjualan,
+                    "jumlah": total_penjualan,
+                    "nama_akun": "Penjualan",
+                    "akun": "4110",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "PENJUALAN_TUNAI" if metode_bayar.upper() == 'CASH' else "PENJUALAN_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "4110",
                     "transaksi_id": transaksi_id,
                     "user_email": user_email,
                     "created_at": datetime.now().isoformat()
                 })
             else:
+                # PENJUALAN KREDIT
+                # 1. Debit: Piutang Usaha (1120)
                 entries.append({
                     "tanggal": tanggal,
-                    "nama_akun": "Piutang Usaha",
-                    "akun_debit": "Piutang Usaha",
-                    "akun_kredit": "Penjualan", 
-                    "ref": "1120",
-                    "ref_id": f"PENJUALAN_{transaksi_id}",
-                    "jumlah": total_penjualan,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1120",
+                    "akun_kredit": "4110",
                     "debit": total_penjualan,
                     "kredit": 0,
-                    "keterangan": f"Piutang penjualan {nama_barang} {jumlah} unit ke {nama_pelanggan}",
-                    "transaksi_type": "PENJUALAN",
+                    "jumlah": total_penjualan,
+                    "nama_akun": "Piutang Usaha",
+                    "akun": "1120",
+                    "jenis": "DEBIT",
+                    "transaksi_type": "PENJUALAN_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "1120",
                     "transaksi_id": transaksi_id,
                     "user_email": user_email,
                     "created_at": datetime.now().isoformat()
                 })
-            
-            # ENTRI KEDUA - PENDAPATAN
-            entries.append({
-                "tanggal": tanggal,
-                "nama_akun": "Penjualan",
-                "akun_debit": "Piutang Usaha" if metode_bayar.upper() != 'CASH' else "Kas",
-                "akun_kredit": "Penjualan",
-                "ref": "4110", 
-                "ref_id": f"PENJUALAN_{transaksi_id}",
-                "jumlah": total_penjualan,
-                "debit": 0,
-                "kredit": total_penjualan,
-                "keterangan": f"Pendapatan penjualan {nama_barang} {jumlah} unit",
-                "transaksi_type": "PENJUALAN",
-                "transaksi_id": transaksi_id,
-                "user_email": user_email,
-                "created_at": datetime.now().isoformat()
-            })
+                
+                # 2. Kredit: Penjualan (4110)
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1120",
+                    "akun_kredit": "4110",
+                    "debit": 0,
+                    "kredit": total_penjualan,
+                    "jumlah": total_penjualan,
+                    "nama_akun": "Penjualan",
+                    "akun": "4110",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "PENJUALAN_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "4110",
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
             
             # JURNAL HPP (jika ada)
             if hpp > 0:
+                # 3. Debit: HPP (5210)
                 entries.append({
                     "tanggal": tanggal,
-                    "nama_akun": "Harga Pokok Penjualan",
-                    "akun_debit": "Harga Pokok Penjualan",
-                    "akun_kredit": "Persediaan Barang Dagang",
-                    "ref": "5210",
-                    "ref_id": f"PENJUALAN_{transaksi_id}",
-                    "jumlah": hpp,
+                    "keterangan": f"HPP {nama_barang}",
+                    "deskripsi": f"HPP {nama_barang}",
+                    "akun_debit": "5210",
+                    "akun_kredit": "1130",
                     "debit": hpp,
                     "kredit": 0,
-                    "keterangan": f"HPP {nama_barang} {jumlah} unit",
-                    "transaksi_type": "PENJUALAN", 
+                    "jumlah": hpp,
+                    "nama_akun": "HPP",
+                    "akun": "5210",
+                    "jenis": "DEBIT",
+                    "transaksi_type": "HPP_PENJUALAN",
+                    "ref_id": ref_id,
+                    "ref": "5210",
                     "transaksi_id": transaksi_id,
                     "user_email": user_email,
                     "created_at": datetime.now().isoformat()
                 })
+                
+                # 4. Kredit: Persediaan Barang Dagang (1130)
                 entries.append({
                     "tanggal": tanggal,
-                    "nama_akun": "Persediaan Barang Dagang",
-                    "akun_debit": "Harga Pokok Penjualan", 
-                    "akun_kredit": "Persediaan Barang Dagang",
-                    "ref": "1130",
-                    "ref_id": f"PENJUALAN_{transaksi_id}",
-                    "jumlah": hpp,
+                    "keterangan": f"HPP {nama_barang}",
+                    "deskripsi": f"HPP {nama_barang}",
+                    "akun_debit": "5210",
+                    "akun_kredit": "1130",
                     "debit": 0,
                     "kredit": hpp,
-                    "keterangan": f"Pengurangan persediaan {nama_barang} {jumlah} unit",
-                    "transaksi_type": "PENJUALAN",
+                    "jumlah": hpp,
+                    "nama_akun": "Persediaan Barang Dagang",
+                    "akun": "1130",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "HPP_PENJUALAN",
+                    "ref_id": ref_id,
+                    "ref": "1130",
                     "transaksi_id": transaksi_id,
                     "user_email": user_email,
                     "created_at": datetime.now().isoformat()
@@ -1248,55 +1306,90 @@ def create_journal_entries(transaksi_type, data, user_email):
                 logger.error("❌ Total pembelian harus > 0")
                 return False
             
-            # PERSEDIAAN BERTAMBAH
-            entries.append({
-                "tanggal": tanggal,
-                "nama_akun": "Persediaan Barang Dagang", 
-                "akun_debit": "Persediaan Barang Dagang",
-                "akun_kredit": "Kas" if metode_bayar.upper() == 'CASH' else "Utang Usaha",
-                "ref": "1130",
-                "ref_id": f"PEMBELIAN_{transaksi_id}",
-                "jumlah": total_pembelian,
-                "debit": total_pembelian,
-                "kredit": 0,
-                "keterangan": f"Pembelian {nama_barang} {jumlah} unit dari {nama_supplier}",
-                "transaksi_type": "PEMBELIAN",
-                "transaksi_id": transaksi_id,
-                "user_email": user_email,
-                "created_at": datetime.now().isoformat()
-            })
+            deskripsi_text = f"Pembelian {nama_barang} {jumlah} unit dari {nama_supplier}"
             
-            # SUMBER PEMBAYARAN
             if metode_bayar.upper() == 'CASH':
+                # PEMBELIAN TUNAI
+                # 1. Debit: Persediaan Barang Dagang (1130)
                 entries.append({
                     "tanggal": tanggal,
-                    "nama_akun": "Kas",
-                    "akun_debit": "Persediaan Barang Dagang",
-                    "akun_kredit": "Kas",
-                    "ref": "1110",
-                    "ref_id": f"PEMBELIAN_{transaksi_id}", 
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1130",
+                    "akun_kredit": "1110",
+                    "debit": total_pembelian,
+                    "kredit": 0,
                     "jumlah": total_pembelian,
+                    "nama_akun": "Persediaan Barang Dagang",
+                    "akun": "1130",
+                    "jenis": "DEBIT",
+                    "transaksi_type": "PEMBELIAN_TUNAI",
+                    "ref_id": ref_id,
+                    "ref": "1130",
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
+                
+                # 2. Kredit: Kas (1110)
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1130",
+                    "akun_kredit": "1110",
                     "debit": 0,
                     "kredit": total_pembelian,
-                    "keterangan": f"Pembayaran pembelian {nama_barang} ke {nama_supplier}",
-                    "transaksi_type": "PEMBELIAN",
+                    "jumlah": total_pembelian,
+                    "nama_akun": "Kas",
+                    "akun": "1110",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "PEMBELIAN_TUNAI",
+                    "ref_id": ref_id,
+                    "ref": "1110",
                     "transaksi_id": transaksi_id,
                     "user_email": user_email,
                     "created_at": datetime.now().isoformat()
                 })
             else:
+                # PEMBELIAN KREDIT
+                # 1. Debit: Persediaan Barang Dagang (1130)
                 entries.append({
                     "tanggal": tanggal,
-                    "nama_akun": "Utang Usaha",
-                    "akun_debit": "Persediaan Barang Dagang", 
-                    "akun_kredit": "Utang Usaha",
-                    "ref": "2110",
-                    "ref_id": f"PEMBELIAN_{transaksi_id}",
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1130",
+                    "akun_kredit": "2110",
+                    "debit": total_pembelian,
+                    "kredit": 0,
                     "jumlah": total_pembelian,
+                    "nama_akun": "Persediaan Barang Dagang",
+                    "akun": "1130",
+                    "jenis": "DEBIT",
+                    "transaksi_type": "PEMBELIAN_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "1130",
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
+                
+                # 2. Kredit: Utang Usaha (2110)
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": "1130",
+                    "akun_kredit": "2110",
                     "debit": 0,
                     "kredit": total_pembelian,
-                    "keterangan": f"Utang pembelian {nama_barang} ke {nama_supplier}",
-                    "transaksi_type": "PEMBELIAN",
+                    "jumlah": total_pembelian,
+                    "nama_akun": "Utang Usaha",
+                    "akun": "2110",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "PEMBELIAN_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "2110",
                     "transaksi_id": transaksi_id,
                     "user_email": user_email,
                     "created_at": datetime.now().isoformat()
@@ -1315,51 +1408,104 @@ def create_journal_entries(transaksi_type, data, user_email):
                 logger.error("❌ Total pengeluaran harus > 0")
                 return False
             
-            # MAPPING JENIS BEBAN
+            # MAPPING JENIS BEBAN KE KODE AKUN
             beban_map = {
-                'PERLENGKAPAN': {'nama': 'Beban Perlengkapan', 'ref': '6110'},
-                'LISTRIK': {'nama': 'Beban Listrik', 'ref': '6140'},
-                'SEWA': {'nama': 'Beban Sewa', 'ref': '6130'}, 
-                'GAJI': {'nama': 'Beban Gaji', 'ref': '6120'},
-                'LAINNYA': {'nama': 'Beban Lainnya', 'ref': '6170'}
+                'PERLENGKAPAN': {'nama': 'Beban Perlengkapan', 'kode': '6110'},
+                'LISTRIK': {'nama': 'Beban TLA', 'kode': '6120'},
+                'SEWA': {'nama': 'Beban Lain-Lain', 'kode': '6140'}, 
+                'GAJI': {'nama': 'Beban Lain-Lain', 'kode': '6140'},
+                'LAINNYA': {'nama': 'Beban Lain-Lain', 'kode': '6140'}
             }
             beban_info = beban_map.get(jenis_beban, beban_map['LAINNYA'])
             
-            # BEBAN BERTAMBAH
-            entries.append({
-                "tanggal": tanggal,
-                "nama_akun": beban_info['nama'],
-                "akun_debit": beban_info['nama'],
-                "akun_kredit": "Kas" if metode_bayar.upper() == 'CASH' else "Utang Usaha",
-                "ref": beban_info['ref'],
-                "ref_id": f"OPERASIONAL_{transaksi_id}",
-                "jumlah": total_pengeluaran,
-                "debit": total_pengeluaran,
-                "kredit": 0,
-                "keterangan": f"{beban_info['nama']} - {nama_barang} dari {supplier}",
-                "transaksi_type": "OPERASIONAL",
-                "transaksi_id": transaksi_id,
-                "user_email": user_email,
-                "created_at": datetime.now().isoformat()
-            })
+            deskripsi_text = f"{beban_info['nama']} - {nama_barang} dari {supplier}"
             
-            # SUMBER PEMBAYARAN
-            entries.append({
-                "tanggal": tanggal,
-                "nama_akun": "Kas" if metode_bayar.upper() == 'CASH' else "Utang Usaha",
-                "akun_debit": beban_info['nama'],
-                "akun_kredit": "Kas" if metode_bayar.upper() == 'CASH' else "Utang Usaha", 
-                "ref": "1110" if metode_bayar.upper() == 'CASH' else "2110",
-                "ref_id": f"OPERASIONAL_{transaksi_id}",
-                "jumlah": total_pengeluaran,
-                "debit": 0,
-                "kredit": total_pengeluaran,
-                "keterangan": f"Pembayaran {beban_info['nama'].lower()} - {nama_barang}",
-                "transaksi_type": "OPERASIONAL",
-                "transaksi_id": transaksi_id,
-                "user_email": user_email,
-                "created_at": datetime.now().isoformat()
-            })
+            if metode_bayar.upper() == 'CASH':
+                # OPERASIONAL TUNAI
+                # 1. Debit: Beban
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": beban_info['nama'],
+                    "akun_kredit": "Kas",
+                    "debit": total_pengeluaran,
+                    "kredit": 0,
+                    "jumlah": total_pengeluaran,
+                    "nama_akun": beban_info['nama'],
+                    "akun": beban_info['kode'],
+                    "jenis": "DEBIT",
+                    "transaksi_type": "OPERASIONAL_TUNAI",
+                    "ref_id": ref_id,
+                    "ref": beban_info['kode'],
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
+                
+                # 2. Kredit: Kas
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": beban_info['nama'],
+                    "akun_kredit": "Kas",
+                    "debit": 0,
+                    "kredit": total_pengeluaran,
+                    "jumlah": total_pengeluaran,
+                    "nama_akun": "Kas",
+                    "akun": "1110",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "OPERASIONAL_TUNAI",
+                    "ref_id": ref_id,
+                    "ref": "1110",
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
+            else:
+                # OPERASIONAL KREDIT
+                # 1. Debit: Beban
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": beban_info['nama'],
+                    "akun_kredit": "Utang Usaha",
+                    "debit": total_pengeluaran,
+                    "kredit": 0,
+                    "jumlah": total_pengeluaran,
+                    "nama_akun": beban_info['nama'],
+                    "akun": beban_info['kode'],
+                    "jenis": "DEBIT",
+                    "transaksi_type": "OPERASIONAL_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": beban_info['kode'],
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
+                
+                # 2. Kredit: Utang Usaha
+                entries.append({
+                    "tanggal": tanggal,
+                    "keterangan": deskripsi_text,
+                    "deskripsi": deskripsi_text,
+                    "akun_debit": beban_info['nama'],
+                    "akun_kredit": "Utang Usaha",
+                    "debit": 0,
+                    "kredit": total_pengeluaran,
+                    "jumlah": total_pengeluaran,
+                    "nama_akun": "Utang Usaha",
+                    "akun": "2110",
+                    "jenis": "KREDIT",
+                    "transaksi_type": "OPERASIONAL_KREDIT",
+                    "ref_id": ref_id,
+                    "ref": "2110",
+                    "transaksi_id": transaksi_id,
+                    "user_email": user_email,
+                    "created_at": datetime.now().isoformat()
+                })
 
         elif transaksi_type == "PRIVE":
             jumlah = float(data.get('jumlah', 0) or data.get('total', 0) or 0)
@@ -1371,40 +1517,49 @@ def create_journal_entries(transaksi_type, data, user_email):
                 logger.error("❌ Jumlah prive harus > 0")
                 return False
             
-            entries.extend([
-                {
-                    "tanggal": tanggal,
-                    "nama_akun": "Prive",
-                    "akun_debit": "Prive",
-                    "akun_kredit": "Kas",
-                    "ref": "3210",
-                    "ref_id": f"PRIVE_{transaksi_id}",
-                    "jumlah": jumlah,
-                    "debit": jumlah,
-                    "kredit": 0,
-                    "keterangan": f"Pengambilan prive: {keterangan}",
-                    "transaksi_type": "PRIVE",
-                    "transaksi_id": transaksi_id,
-                    "user_email": user_email,
-                    "created_at": datetime.now().isoformat()
-                },
-                {
-                    "tanggal": tanggal,
-                    "nama_akun": "Kas",
-                    "akun_debit": "Prive", 
-                    "akun_kredit": "Kas",
-                    "ref": "1110",
-                    "ref_id": f"PRIVE_{transaksi_id}",
-                    "jumlah": jumlah,
-                    "debit": 0,
-                    "kredit": jumlah,
-                    "keterangan": f"Pembayaran prive: {keterangan}",
-                    "transaksi_type": "PRIVE",
-                    "transaksi_id": transaksi_id,
-                    "user_email": user_email,
-                    "created_at": datetime.now().isoformat()
-                }
-            ])
+            deskripsi_text = f"Pengambilan prive: {keterangan}"
+            
+            # 1. Debit: Prive (3210)
+            entries.append({
+                "tanggal": tanggal,
+                "keterangan": deskripsi_text,
+                "deskripsi": deskripsi_text,
+                "akun_debit": "3210",
+                "akun_kredit": "1110",
+                "debit": jumlah,
+                "kredit": 0,
+                "jumlah": jumlah,
+                "nama_akun": "Prive",
+                "akun": "3210",
+                "jenis": "DEBIT",
+                "transaksi_type": "PENGAMBILAN_PRIVE",
+                "ref_id": ref_id,
+                "ref": "3210",
+                "transaksi_id": transaksi_id,
+                "user_email": user_email,
+                "created_at": datetime.now().isoformat()
+            })
+            
+            # 2. Kredit: Kas (1110)
+            entries.append({
+                "tanggal": tanggal,
+                "keterangan": deskripsi_text,
+                "deskripsi": deskripsi_text,
+                "akun_debit": "3210",
+                "akun_kredit": "1110",
+                "debit": 0,
+                "kredit": jumlah,
+                "jumlah": jumlah,
+                "nama_akun": "Kas",
+                "akun": "1110",
+                "jenis": "KREDIT",
+                "transaksi_type": "PENGAMBILAN_PRIVE",
+                "ref_id": ref_id,
+                "ref": "1110",
+                "transaksi_id": transaksi_id,
+                "user_email": user_email,
+                "created_at": datetime.now().isoformat()
+            })
 
         elif transaksi_type == "TAMBAHAN_MODAL":
             jumlah = float(data.get('jumlah', 0) or data.get('total', 0) or 0)
@@ -1416,40 +1571,49 @@ def create_journal_entries(transaksi_type, data, user_email):
                 logger.error("❌ Jumlah modal harus > 0")
                 return False
             
-            entries.extend([
-                {
-                    "tanggal": tanggal,
-                    "nama_akun": "Kas",
-                    "akun_debit": "Kas",
-                    "akun_kredit": "Modal Pemilik", 
-                    "ref": "1110",
-                    "ref_id": f"MODAL_{transaksi_id}",
-                    "jumlah": jumlah,
-                    "debit": jumlah,
-                    "kredit": 0,
-                    "keterangan": f"Setoran modal: {keterangan}",
-                    "transaksi_type": "TAMBAHAN_MODAL",
-                    "transaksi_id": transaksi_id,
-                    "user_email": user_email,
-                    "created_at": datetime.now().isoformat()
-                },
-                {
-                    "tanggal": tanggal,
-                    "nama_akun": "Modal Pemilik",
-                    "akun_debit": "Kas",
-                    "akun_kredit": "Modal Pemilik",
-                    "ref": "3110",
-                    "ref_id": f"MODAL_{transaksi_id}",
-                    "jumlah": jumlah,
-                    "debit": 0,
-                    "kredit": jumlah,
-                    "keterangan": f"Tambahan modal: {keterangan}",
-                    "transaksi_type": "TAMBAHAN_MODAL",
-                    "transaksi_id": transaksi_id,
-                    "user_email": user_email,
-                    "created_at": datetime.now().isoformat()
-                }
-            ])
+            deskripsi_text = f"Setoran modal: {keterangan}"
+            
+            # 1. Debit: Kas (1110)
+            entries.append({
+                "tanggal": tanggal,
+                "keterangan": deskripsi_text,
+                "deskripsi": deskripsi_text,
+                "akun_debit": "1110",
+                "akun_kredit": "3110",
+                "debit": jumlah,
+                "kredit": 0,
+                "jumlah": jumlah,
+                "nama_akun": "Kas",
+                "akun": "1110",
+                "jenis": "DEBIT",
+                "transaksi_type": "MODAL_SETORAN",
+                "ref_id": ref_id,
+                "ref": "1110",
+                "transaksi_id": transaksi_id,
+                "user_email": user_email,
+                "created_at": datetime.now().isoformat()
+            })
+            
+            # 2. Kredit: Modal Pemilik (3110)
+            entries.append({
+                "tanggal": tanggal,
+                "keterangan": deskripsi_text,
+                "deskripsi": deskripsi_text,
+                "akun_debit": "1110",
+                "akun_kredit": "3110",
+                "debit": 0,
+                "kredit": jumlah,
+                "jumlah": jumlah,
+                "nama_akun": "Modal Pemilik",
+                "akun": "3110",
+                "jenis": "KREDIT",
+                "transaksi_type": "MODAL_SETORAN",
+                "ref_id": ref_id,
+                "ref": "3110",
+                "transaksi_id": transaksi_id,
+                "user_email": user_email,
+                "created_at": datetime.now().isoformat()
+            })
 
         # 💾 SIMPAN KE DATABASE
         success_count = 0
@@ -1461,25 +1625,35 @@ def create_journal_entries(transaksi_type, data, user_email):
             try:
                 # Validasi minimal
                 if not entry.get('nama_akun'):
+                    logger.warning(f"⚠️ Skipping entry tanpa nama_akun: {entry}")
                     continue
-                    
+                
+                # Pastikan tipe data benar
+                for field in ['debit', 'kredit', 'jumlah']:
+                    if isinstance(entry[field], str):
+                        entry[field] = float(entry[field])
+                    elif entry[field] is None:
+                        entry[field] = 0
+                
                 result = supabase.table("jurnal_umum").insert(entry).execute()
                 if result.data:
                     success_count += 1
-                    logger.info(f"✅ Jurnal: {entry['nama_akun']} - {entry['debit']}/{entry['kredit']}")
+                    logger.info(f"✅ Jurnal: {entry['nama_akun']} ({entry['akun']}) - Debit: {entry['debit']}, Kredit: {entry['kredit']}")
                 else:
-                    logger.error(f"❌ Gagal: {result.error}")
+                    logger.error(f"❌ Gagal insert: {result.error}")
             except Exception as e:
-                logger.error(f"❌ Exception: {str(e)}")
+                logger.error(f"❌ Exception saat insert: {str(e)}")
+                logger.error(f"   Entry: {entry}")
                 continue
         
-        logger.info(f"🎀 {success_count}/{len(entries)} jurnal berhasil")
+        logger.info(f"🎀 {success_count}/{len(entries)} jurnal berhasil dibuat (Ref_ID: {ref_id})")
         return success_count > 0
         
     except Exception as e:
         logger.error(f"❌ Error create_journal_entries: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
-
 
 # ============================================================
 # 🎀 ROUTE: Generate Jurnal Otomatis - PINK THEME
@@ -3242,8 +3416,8 @@ def pembelian():
                             message = '<div class="message error">❌ Gagal menyimpan pelunasan (DB).</div>'
                             logger.error("Insert pelunasan_utang gagal: %s", getattr(ins_p, "error", "no-detail"))
                         else:
-                            # buat jurnal pelunasan: Utang (D) / Kas/Bank (K)
-                            akun_kredit = "Kas" if metode_bayar == "CASH" else "Bank"
+                            # buat jurnal pelunasan: Utang (D) / Kas (K)
+                            akun_kredit = "Kas" 
                             try:
                                 supabase.table("jurnal_umum").insert({
                                     "tanggal": tanggal_bayar,
@@ -3545,7 +3719,7 @@ def buku_besar():
                 # Kredit Modal
                 supabase.table("jurnal_umum").insert({
                     "tanggal": modal.get('tanggal'),
-                    "nama_akun": "Modal (3100)",
+                    "nama_akun": "Modal Pemilik (3110)",
                     "debit": 0,
                     "kredit": modal.get('jumlah'),
                     "keterangan": modal.get('keterangan', 'Setoran Modal'),
@@ -3569,23 +3743,21 @@ def buku_besar():
     # =======================================================
     account_order = [
         # ASET LANCAR
-        "Kas (1110)", "Piutang Usaha (1130)", "Perlengkapan (1150)",
+        "Kas (1110)", "Piutang Usaha (1120)", "Persediaan Barang Dagang (1130)", "Perlengkapan (1140)",
         # ASET TETAP  
-        "Tanah (1210)", "Bangunan (1220)", "Akumulasi Penyusutan Bangunan (1221)",
-        "Kendaraan (1230)", "Akumulasi Penyusutan Kendaraan (1231)", 
-        "Peralatan (1240)", "Akumulasi Penyusutan Peralatan (1241)",
+        "Akumulasi Penyusutan (1260)", "Tanah (1261)", "Bangunan (1262)", 
+        "Kendaraan (1263)", "Peralatan (1264)", "Inventaris (1265)",
         # UTANG
-        "Utang (2100)", "Pendapatan Diterima Dimuka (2200)",
+        "Utang Usaha (2110)", "Pendapatan Diterima Di muka (2120)",
         # MODAL
-        "Modal (3100)", "Prive Mas Angga (3200)", "Ikhtisar L/R (3300)",
+        "Modal Pemilik (3110)", "Prive (3210)", "Ikhtisar Laba Rugi (3310)",
         # PENDAPATAN
-        "Penjualan (4100)", "Retur Penjualan (4200)", "Potongan Penjualan (4300)",
-        # HPP & PEMBELIAN
-        "HPP (5110)", "Pembelian (5200)",
+        "Penjualan (4110)",
+        # HPP 
+        "Pembelian (5120)", "HPP (5210)",
         # BEBAN
-        "Beban Perlengkapan (6100)", "Beban air, listrik dan telepon (6200)", 
-        "Beban Penyusutan (6300)", "Beban Lainnya (6900)",
-        "Lainnya"
+        "Beban Perlengkapan (6110)", "Beban TLA (6120)", 
+        "Beban Penyusutan (6130)", "Beban Lainnya (6140)",
     ]
 
     # Kelompokkan data
@@ -3625,14 +3797,13 @@ def buku_besar():
                 kredit = float(e.get('kredit', 0) or 0)
                 
                 # Hitung saldo berdasarkan jenis akun
-                if akun in ["Kas (1110)", "Piutang Usaha (1130)", "Perlengkapan (1150)", 
-                           "Tanah (1210)", "Bangunan (1220)", "Kendaraan (1230)", "Peralatan (1240)"]:
+                if akun in ["Kas (1110)", "Piutang Usaha (1120)", "Perlengkapan (1140)", 
+                           "Tanah (1261)", "Bangunan (1262)", "Kendaraan (1263)", "Peralatan (1264)"]:
                     saldo += debit - kredit
-                elif akun in ["Akumulasi Penyusutan Bangunan (1221)", "Akumulasi Penyusutan Kendaraan (1231)", 
-                             "Akumulasi Penyusutan Peralatan (1241)"]:
+                elif akun in ["Akumulasi Penyusutan (1260)"]:
                     saldo += kredit - debit
-                elif akun in ["Utang (2100)", "Pendapatan Diterima Dimuka (2200)", "Modal (3100)", 
-                             "Penjualan (4100)", "Retur Penjualan (4200)", "Potongan Penjualan (4300)"]:
+                elif akun in ["Utang Usaha (2110)", "Pendapatan Diterima Di muka (2120)", "Modal Pemilik(3110)", 
+                             "Penjualan (4110)"]:
                     saldo += kredit - debit
                 else:
                     saldo += debit - kredit
@@ -4411,69 +4582,41 @@ def create_table_if_not_exists():
 def get_kode_akun(nama_akun):
     """Get kode akun berdasarkan nama akun - EXPANDED"""
     kode_map = {
-        # Aset (1xxx)
-        "Kas": "1110",
-        "Kas di Tangan": "1110",
-        "Kas di Bank": "1111",
-        "Piutang": "1120",
-        "Piutang Usaha": "1120",
-        "Piutang Dagang": "1121",
-        "Persediaan": "1130",
-        "Persediaan Barang Dagang": "1130",
-        "Perlengkapan": "1140",
-        "Perlengkapan Kantor": "1141",
-        "Perlengkapan Toko": "1142",
-        "Sewa Dibayar di Muka": "1150",
-        "Asuransi Dibayar di Muka": "1151",
-        "Aset Tetap": "1210",
-        "Akumulasi Penyusutan": "1260",
-        
-        # Kewajiban (2xxx)
-        "Utang": "2110",
-        "Utang Usaha": "2110",
-        "Utang Dagang": "2111",
-        "Utang Bank": "2120",
-        "Utang Wesel": "2130",
-        "Utang Gaji": "2140",
-        "Utang Sewa": "2150",
-        
-        # Modal (3xxx)
-        "Modal": "3110",
-        "Modal Pemilik": "3110",
-        "Prive": "3120",
-        "Laba Ditahan": "3130",
-        
-        # Pendapatan (4xxx)
-        "Pendapatan": "4110",
-        "Pendapatan Jasa": "4110",
-        "Penjualan": "4110",
-        "Pendapatan Penjualan": "4110",
-        "Pendapatan Sewa": "4120",
-        "Pendapatan Bunga": "4130",
-        
-        # Beban (5xxx & 6xxx)
-        "HPP": "5110",
-        "Harga Pokok Penjualan": "5110",
-        "Pembelian": "5120",
-        "Beban Angkut Pembelian": "5130",
-        "Potongan Pembelian": "5140",
-        "Retur Pembelian": "5150",
-        "Beban Gaji": "6110",
-        "Beban Upah": "6111",
-        "Beban Sewa": "6120",
-        "Beban Penyusutan": "6130",
-        "Beban Perlengkapan": "6140",
-        "Beban Listrik": "6150",
-        "Beban Air": "6160",
-        "Beban Telepon": "6170",
-        "Beban Internet": "6180",
-        "Beban Transportasi": "6190",
-        "Beban Administrasi": "6210",
-        "Beban Pemasaran": "6220",
-        "Beban Bunga": "6230",
-        "Beban Asuransi": "6240",
-        "Beban Pemeliharaan": "6250",
-        "Beban Lain-lain": "6260",
+        # Aset Lancar
+    "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+    "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+    "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+    "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+
+    # Aset Tetap
+    "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
+    "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+    "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+    "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+    "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+    "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+
+    # Utang
+    "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
+    "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
+    
+    # Modal
+    "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
+    "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
+    "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
+
+    # Pendapatan
+    "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
+
+    # HPP
+    "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "kredit"},
+    "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
+
+    # Beban Operasional
+    "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
+    "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
+    "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
+    "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
     }
     return kode_map.get(nama_akun, "0000")
 
@@ -4914,7 +5057,6 @@ def generate_jurnal_penyesuaian_html(user_email, message, jurnal_data, total_deb
                                     <optgroup label="Akumulasi & Kewajiban">
                                         <option value="Akumulasi Penyusutan">Akumulasi Penyusutan</option>
                                         <option value="Utang Usaha">Utang Usaha</option>
-                                        <option value="Utang Bank">Utang Bank</option>
                                     </optgroup>
                                     <optgroup label="Aset & Pendapatan">
                                         <option value="Perlengkapan">Perlengkapan</option>
@@ -5103,16 +5245,24 @@ def laporan_posisi_keuangan():
             kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
             
             if kode_akun not in akun_data:
-                 akun_data[kode_akun] = {
+                akun_data[kode_akun] = {
                     'nama_akun': akun_nama,
                     'kode_akun': kode_akun,
-                    'neraca_debit': 0, 'neraca_kredit': 0,
-                    'penyesuaian_debit': 0, 'penyesuaian_kredit': 0
+
+                    # Saldo normal (jurnal biasa)
+                    'saldo_debit': 0,
+                    'saldo_kredit': 0,
+                    # Untuk neraca saldo setelah penutupan
+                    'neraca_debit': 0,
+                    'neraca_kredit': 0,
+                    # Jurnal penyesuaian
+                    'penyesuaian_debit': 0,
+                    'penyesuaian_kredit': 0
                 }
-            
-            if jurnal.get('transaksi_type', '').lower() in ['penyesuaian', 'penyesuaian_manual', 'penyesuaian_aset', 'penyesuaian_otomatis']:
+            if str(jurnal.get('transaksi_type', '')).lower() in ['penyesuaian', 'penyesuaian_manual', 'penyesuaian_aset', 'penyesuaian_otomatis']:
                 akun_data[kode_akun]['penyesuaian_debit'] += debit
                 akun_data[kode_akun]['penyesuaian_kredit'] += kredit
+
             else:
                 akun_data[kode_akun]['neraca_debit'] += debit
                 akun_data[kode_akun]['neraca_kredit'] += kredit
@@ -5694,41 +5844,51 @@ def jurnal_penutup():
         # Proses data akun
         akun_data = {}
         for akun_nama, nsa_info in nsa_consolidated.items():
-            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            akun_nama_norm = str(akun_nama or "").strip().lower()
+            kode_akun = next(
+                    (kode for kode, nama in akun_standar.items()
+                    if str(nama or "").strip().lower() == akun_nama_norm
+                    ),
+                    akun_nama  # fallback
+                )
+        akun_data[kode_akun] = {
+                    'nama_akun': akun_nama,
+                    'kode_akun': kode_akun,
+                    'neraca_debit': nsa_info['debit'],
+                    'neraca_kredit': nsa_info['kredit'],
+                    'penyesuaian_debit': 0,
+                    'penyesuaian_kredit': 0
+                }
+            
+        # Proses jurnal
+        for jurnal in jurnal_data:
+            akun_nama_raw = jurnal.get('nama_akun')
+            akun_nama = str(akun_nama_raw or "").strip()
+            debit = float(jurnal.get('debit', 0) or 0)
+            kredit = float(jurnal.get('kredit', 0) or 0)
+            akun_nama_l = akun_nama.lower()
+            kode_akun = next(
+                (kode for kode, nama in akun_standar.items()
+                if str(nama or "").strip().lower() == akun_nama_l),
+                akun_nama
+            )
+        if kode_akun not in akun_data:
             akun_data[kode_akun] = {
                 'nama_akun': akun_nama,
                 'kode_akun': kode_akun,
-                'neraca_debit': nsa_info['debit'],
-                'neraca_kredit': nsa_info['kredit'],
-                'penyesuaian_debit': 0,
-                'penyesuaian_kredit': 0,
-                'nssp_debit': 0,
-                'nssp_kredit': 0
+                'neraca_debit': 0, 'neraca_kredit': 0,
+                'penyesuaian_debit': 0, 'penyesuaian_kredit': 0,
+                'nssp_debit': 0, 'nssp_kredit': 0
             }
-
-        # Proses jurnal
-        for jurnal in jurnal_data:
-            akun_nama = jurnal.get('nama_akun', 'Unknown')
-            debit = float(jurnal.get('debit', 0) or 0)
-            kredit = float(jurnal.get('kredit', 0) or 0)
             
-            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
-            
-            if kode_akun not in akun_data:
-                 akun_data[kode_akun] = {
-                    'nama_akun': akun_nama,
-                    'kode_akun': kode_akun,
-                    'neraca_debit': 0, 'neraca_kredit': 0,
-                    'penyesuaian_debit': 0, 'penyesuaian_kredit': 0,
-                    'nssp_debit': 0, 'nssp_kredit': 0
-                }
-            
-            if jurnal.get('transaksi_type', '').lower() in ['penyesuaian', 'penyesuaian_manual', 'penyesuaian_aset', 'penyesuaian_otomatis']:
+        trans_type = str(jurnal.get('transaksi_type') or "").strip().lower()
+        if trans_type in ['penyesuaian', 'penyesuaian_manual', 'penyesuaian_aset', 'penyesuaian_otomatis']:
                 akun_data[kode_akun]['penyesuaian_debit'] += debit
                 akun_data[kode_akun]['penyesuaian_kredit'] += kredit
-            else:
+        else:
                 akun_data[kode_akun]['neraca_debit'] += debit
                 akun_data[kode_akun]['neraca_kredit'] += kredit
+
         
         # Hitung NSSP
         for kode_akun, data in akun_data.items():
@@ -6348,7 +6508,7 @@ def jurnal_penutup():
         """
 
 # ============================================================
-# 🔹 ROUTE: Neraca Saldo Setelah Penutupan - FIXED & COMPLETE
+# 🔹 ROUTE: Neraca Saldo Setelah Penutupan
 # ============================================================
 @app.route("/neraca-saldo-setelah-penutupan")
 def neraca_saldo_setelah_penutupan():
@@ -6439,49 +6599,41 @@ def neraca_saldo_setelah_penutupan():
         # 6. STRUKTUR AKUN LENGKAP 
         # ============================================================
         struktur_akun = {
-            # ASET LANCAR
-            '1100': {'nama': 'Aset Lancar', 'type': 'header'},
-            '1110': {'nama': 'Kas', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1130': {'nama': 'Piutang Usaha', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1140': {'nama': 'Persediaan Barang Dagang', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1150': {'nama': 'Perlengkapan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
+            # Aset Lancar
+            "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+            "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+            "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+            "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+
+            # Aset Tetap
+            "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
+            "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+            "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+            "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+            "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+            "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+
+            # Utang
+            "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
+            "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
             
-            # ASET TETAP
-            '1200': {'nama': 'Aset Tetap', 'type': 'header'},
-            '1210': {'nama': 'Tanah', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1220': {'nama': 'Bangunan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1221': {'nama': 'Akumulasi Penyusutan Bangunan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1230': {'nama': 'Kendaraan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1231': {'nama': 'Akumulasi Penyusutan Kendaraan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1240': {'nama': 'Peralatan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '1241': {'nama': 'Akumulasi Penyusutan Peralatan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            
-            # UTANG
-            '2000': {'nama': 'Utang', 'type': 'header'},
-            '2100': {'nama': 'Utang', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '2200': {'nama': 'Pendapatan ddm', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': total_pdd},
-            
-            # MODAL (Modal Akhir sudah termasuk laba/rugi dan dikurangi prive)
-            '3000': {'nama': 'Modal', 'type': 'header'},
-            '3100': {'nama': 'Modal', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': modal_akhir},
-            '3200': {'nama': 'Prive Mas Angga', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '3300': {'nama': 'Ikhitsar L/R', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            
-            # PENDAPATAN (SUDAH DITUTUP - SALDO 0)
-            '4000': {'nama': 'Pendapatan', 'type': 'header'},
-            '4100': {'nama': 'Penjualan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '4200': {'nama': 'Retur Penjualan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '4300': {'nama': 'Potongan Penjualan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            
-            # HPP & PEMBELIAN (SUDAH DITUTUP - SALDO 0)
-            '5110': {'nama': 'HPP', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '5200': {'nama': 'Pembelian', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            
-            # BEBAN (SUDAH DITUTUP - SALDO 0)
-            '6000': {'nama': 'Beban', 'type': 'header'},
-            '6100': {'nama': 'Beban Perlengkapan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '6200': {'nama': 'Beban air, listrik dan telepon', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0},
-            '6300': {'nama': 'Beban Penyusutan', 'type': 'detail', 'saldo_debit': 0, 'saldo_kredit': 0}
+            # Modal
+            "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
+            "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
+            "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
+
+            # Pendapatan
+            "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
+
+            # HPP
+            "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "debit"},
+            "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
+
+            # Beban Operasional
+            "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
+            "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
+            "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
+            "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
         }
 
         # DEBUG: Tampilkan data neraca lajur yang didapat
@@ -6525,11 +6677,11 @@ def neraca_saldo_setelah_penutupan():
             print(f"✅ Kas dari jurnal_umum: {saldo_kas}")
         except Exception as e:
             print(f"❌ Tidak bisa ambil Kas: {e}")
-            # Fallback ke nilai dari neraca lajur
-            for item in neraca_lajur_data:
-                if 'kas' in str(item.get('account_name', '')).lower():
-                    saldo_kas = float(item.get('neraca_debit', 0) or 0)
-                    break
+        for item in neraca_lajur_data:
+            nama = str(item.get('account_name') or "").strip().lower()
+            if "kas" in nama:
+                saldo_kas = float(item.get('neraca_debit', 0) or 0)
+                break
 
         struktur_akun['1110']['saldo_debit'] = max(saldo_kas, 0)
 
@@ -6555,7 +6707,7 @@ def neraca_saldo_setelah_penutupan():
                     total_piutang = float(item.get('neraca_debit', 0) or 0)
                     break
 
-        struktur_akun['1130']['saldo_debit'] = max(total_piutang, 0)
+        struktur_akun['1120']['saldo_debit'] = max(total_piutang, 0)
 
         # C. PERSEDIAAN - Coba dari jurnal umum
         total_persediaan = 0
@@ -6579,7 +6731,7 @@ def neraca_saldo_setelah_penutupan():
                     total_persediaan = float(item.get('neraca_debit', 0) or 0)
                     break
 
-        struktur_akun['1140']['saldo_debit'] = max(total_persediaan, 0)
+        struktur_akun['1130']['saldo_debit'] = max(total_persediaan, 0)
 
         # D. PERLENGKAPAN - Coba dari jurnal umum
         total_perlengkapan = 0
@@ -6587,7 +6739,7 @@ def neraca_saldo_setelah_penutupan():
             perlengkapan_result = supabase.table("jurnal_umum")\
                 .select("debit, kredit, account_code")\
                 .eq("user_email", user_email)\
-                .eq("account_code", "1150")\
+                .eq("account_code", "1140")\
                 .execute()
             
             for transaksi in perlengkapan_result.data:
@@ -6603,13 +6755,13 @@ def neraca_saldo_setelah_penutupan():
                     total_perlengkapan = float(item.get('neraca_debit', 0) or 0)
                     break
 
-        struktur_akun['1150']['saldo_debit'] = max(total_perlengkapan, 0)
+        struktur_akun['1140']['saldo_debit'] = max(total_perlengkapan, 0)
 
         print(f"=== HASIL AKHIR ASET LANCAR ===")
         print(f"Kas: {struktur_akun['1110']['saldo_debit']}")
-        print(f"Piutang: {struktur_akun['1130']['saldo_debit']}") 
-        print(f"Persediaan: {struktur_akun['1140']['saldo_debit']}")
-        print(f"Perlengkapan: {struktur_akun['1150']['saldo_debit']}")
+        print(f"Piutang: {struktur_akun['1120']['saldo_debit']}") 
+        print(f"Persediaan: {struktur_akun['1130']['saldo_debit']}")
+        print(f"Perlengkapan: {struktur_akun['1140']['saldo_debit']}")
         # ============================================================
         # 8. UPDATE ASET TETAP & AKUMULASI PENYUSUTAN
         # ============================================================
@@ -6620,16 +6772,16 @@ def neraca_saldo_setelah_penutupan():
             akumulasi = float(aset.get('akumulasi_penyusutan', 0) or 0)
             
             if 'tanah' in jenis or 'tanah' in nama:
-                struktur_akun['1210']['saldo_debit'] = nilai
+                struktur_akun['1261']['saldo_debit'] = nilai
             elif 'bangunan' in jenis or 'bangunan' in nama:
-                struktur_akun['1220']['saldo_debit'] = nilai
-                struktur_akun['1221']['saldo_kredit'] = akumulasi
+                struktur_akun['1263']['saldo_debit'] = nilai
+                struktur_akun['1260']['saldo_kredit'] = akumulasi
             elif 'kendaraan' in jenis or 'kendaraan' in nama or 'mobil' in nama:
-                struktur_akun['1230']['saldo_debit'] = nilai
-                struktur_akun['1231']['saldo_kredit'] = akumulasi
+                struktur_akun['1264']['saldo_debit'] = nilai
+                struktur_akun['1260']['saldo_kredit'] = akumulasi
             elif 'peralatan' in jenis or 'peralatan' in nama or 'mesin' in nama:
-                struktur_akun['1240']['saldo_debit'] = nilai
-                struktur_akun['1241']['saldo_kredit'] = akumulasi
+                struktur_akun['1265']['saldo_debit'] = nilai
+                struktur_akun['1260']['saldo_kredit'] = akumulasi
 
         # ============================================================
         # 9. HITUNG TOTAL DEBIT & KREDIT
@@ -6637,12 +6789,12 @@ def neraca_saldo_setelah_penutupan():
         total_debit = sum(
             data.get('saldo_debit', 0) 
             for data in struktur_akun.values() 
-            if data['type'] == 'detail'
+            if data.get('type') == 'detail'
         )
         total_kredit = sum(
             data.get('saldo_kredit', 0) 
             for data in struktur_akun.values() 
-            if data['type'] == 'detail'
+            if data.get('type') == 'detail'
         )
 
         # ============================================================
@@ -6652,7 +6804,7 @@ def neraca_saldo_setelah_penutupan():
         for kode in sorted(struktur_akun.keys()):
             data = struktur_akun[kode]
             
-            if data['type'] == 'header':
+            if data.get('type', 'header') == 'header':
                 rows_html += f"""
                 <tr class="header-row">
                     <td><strong>{kode}</strong></td>
@@ -10219,13 +10371,19 @@ def hitung_arus_kas_fixed():
         
         # 4. LOOP & KLASIFIKASI TRANSAKSI
         for jurnal in jurnal_data:
-            nama_akun = jurnal.get('nama_akun', '').lower()
-            transaksi_type = jurnal.get('transaksi_type', '').lower()
-            debit = float(jurnal.get('debit', 0) or 0)
-            kredit = float(jurnal.get('kredit', 0) or 0)
-            
-            # A. PENYESUAIAN OPERASI (Hanya Akun yang TIDAK terkait Kas/Bank)
-            
+            # baca nama akun dari semua kemungkinan kolom
+            nama_akun = str(
+                jurnal.get('nama_akun') or
+                jurnal.get('nama akun') or
+                jurnal.get('akun') or
+                ""
+            ).lower()
+            transaksi_type = str(jurnal.get('transaksi_type') or "").lower()
+            # amanin angka debit/kredit biar gak error
+            debit = float(jurnal.get('debit') or 0)
+            kredit = float(jurnal.get('kredit') or 0)
+
+            # A. PENYESUAIAN OPERASI (Hanya Akun yang TIDAK terkait Kas)
             # Beban Penyusutan (Non-Kas)
             if 'beban penyusutan' in nama_akun and debit > 0:
                 data['beban_penyusutan'] += debit
@@ -10978,7 +11136,7 @@ def pendapatan_diterima_dimuka():
                     {
                         "user_email": user_email,
                         "tanggal": tanggal,
-                        "nama_akun": "Kas" if metode_pembayaran == "tunai" else "Bank",
+                        "nama_akun": "Kas",
                         "debit": jumlah_dp,
                         "kredit": 0,
                         "keterangan": f"DP {dp_persen}% dari {nama_customer}: {keterangan}",
@@ -11308,7 +11466,7 @@ def generate_pdd_rows(pdd_data):
     return rows
 
 # ============================================================
-# 🔹 ROUTE: Neraca Saldo Awal (Input Manual)
+# 🔹 ROUTE: Neraca Saldo Awal 
 # ============================================================
 @app.route("/neraca-saldo-awal", methods=["GET", "POST"])
 def neraca_saldo_awal():
@@ -11574,7 +11732,7 @@ def get_initial_balance_data():
         return {}
 
 # ============================================================
-# 🔹 ROUTE: Neraca Lajur (Worksheet) - DIPERBAIKI DENGAN LOGIKA AKUNTANSI YANG BENAR
+# 🔹 ROUTE: Neraca Lajur (Worksheet) - SESUAI CHART_OF_ACCOUNTS
 # ============================================================
 @app.route("/neraca-lajur")
 def neraca_lajur():
@@ -11584,7 +11742,7 @@ def neraca_lajur():
     user_email = session.get('user_email')
     
     try:
-        # 1. AMBIL DATA DARI JURNAL UMUM (Transaksi)
+        # 1. AMBIL DATA DARI JURNAL UMUM
         try:
             jurnal_result = supabase.table("jurnal_umum").select("*").order("tanggal").execute()
             jurnal_data = jurnal_result.data or []
@@ -11592,7 +11750,7 @@ def neraca_lajur():
             logger.warning(f"Gagal ambil jurnal umum: {e}")
             jurnal_data = []
         
-        # 2. AMBIL DATA DARI JURNAL PENYESUAIAN (NSSP)
+        # 2. AMBIL DATA DARI JURNAL PENYESUAIAN
         try:
             penyesuaian_result = supabase.table("jurnal_penyesuaian").select("*").order("tanggal").execute()
             penyesuaian_data = penyesuaian_result.data or []
@@ -11600,57 +11758,109 @@ def neraca_lajur():
             logger.warning(f"Gagal ambil jurnal penyesuaian: {e}")
             penyesuaian_data = []
         
-        # 3. AMBIL DATA NERACA SALDO AWAL (NSA)
+        # 3. AMBIL DATA NERACA SALDO AWAL
         nsa_consolidated = get_initial_balance_data()
         
-        # Filter: hapus akun tidak diinginkan (jika ada)
+        # Filter: hapus akun tidak diinginkan
         jurnal_data = filter_akun_tidak_diinginkan(jurnal_data)
         
-        # Daftar akun standar
-        akun_standar = {kode: info['nama'] for kode, info in CHART_OF_ACCOUNTS.items()}
+        # 4. NORMALISASI AKUN SESUAI CHART_OF_ACCOUNTS
+        def normalize_akun_data(akun_nama):
+            """Normalisasi nama akun sesuai CHART_OF_ACCOUNTS"""
+            nama_lower = akun_nama.lower().strip()
+            
+            # Mapping langsung berdasarkan nama
+            akun_mapping = {
+                # Aset Lancar
+                "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+                "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+                "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+                "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
+
+                # Aset Tetap
+                "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
+                "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+                "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
+
+                # Utang
+                "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
+                "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
+                
+                # Modal
+                "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
+                "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
+                "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
+
+                # Pendapatan
+                "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
+
+                # HPP
+                "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "kredit"},
+                "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
+
+                # Beban Operasional
+                "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
+                "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
+                "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
+                "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
+            }
+            
+            # Cari mapping berdasarkan nama
+            for key, kode in akun_mapping.items():
+                if key in nama_lower:
+                    return kode, CHART_OF_ACCOUNTS[kode]['nama']
+            
+            # Jika tidak ditemukan, coba cari partial match di CHART_OF_ACCOUNTS
+            for kode, info in CHART_OF_ACCOUNTS.items():
+                if info['nama'].lower() in nama_lower or nama_lower in info['nama'].lower():
+                    return kode, info['nama']
+            
+            # Default: gunakan nama asli
+            return None, akun_nama
         
-        # 4. INISIALISASI AKUN_DATA DENGAN SALDO AWAL (NSA)
+        # 5. INISIALISASI AKUN_DATA DENGAN SALDO AWAL
         akun_data = {}
+        
         for akun_nama, nsa_info in nsa_consolidated.items():
-            # Cari kode akun berdasarkan nama
-            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            kode_akun, nama_normal = normalize_akun_data(akun_nama)
+            
+            if not kode_akun:
+                kode_akun = akun_nama
             
             akun_data[kode_akun] = {
-                'nama_akun': akun_nama,
+                'nama_akun': nama_normal,
                 'kode_akun': kode_akun,
-                # Kolom 1-2: Neraca Saldo Awal (NSA)
                 'neraca_debit': float(nsa_info['debit']),
                 'neraca_kredit': float(nsa_info['kredit']),
-                # Kolom 3-4: Penyesuaian (dari jurnal_penyesuaian)
                 'penyesuaian_debit': 0,
                 'penyesuaian_kredit': 0,
-                # Kolom 5-6: Neraca Saldo Setelah Penyesuaian (NSSP)
                 'nssp_debit': 0,
                 'nssp_kredit': 0,
-                # Kolom 7-8: Laba Rugi
                 'laba_rugi_debit': 0,
                 'laba_rugi_kredit': 0,
-                # Kolom 9-10: Laporan Posisi Keuangan (Neraca)
                 'posisi_keuangan_debit': 0,
                 'posisi_keuangan_kredit': 0,
-                # Tipe akun untuk klasifikasi
                 'tipe_akun': '',
-                # Saldo NSSP (untuk perhitungan)
                 'saldo_nssp': 0
             }
         
-        # 5. TAMBAHKAN TRANSAKSI DARI JURNAL UMUM KE NERACA SALDO
+        # 6. TAMBAHKAN TRANSAKSI DARI JURNAL UMUM
         for jurnal in jurnal_data:
             akun_nama = jurnal.get('nama_akun', 'Unknown')
             debit = float(jurnal.get('debit', 0) or 0)
             kredit = float(jurnal.get('kredit', 0) or 0)
             
-            # Cari kode akun
-            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            kode_akun, nama_normal = normalize_akun_data(akun_nama)
+            
+            if not kode_akun:
+                kode_akun = akun_nama
             
             if kode_akun not in akun_data:
                 akun_data[kode_akun] = {
-                    'nama_akun': akun_nama,
+                    'nama_akun': nama_normal,
                     'kode_akun': kode_akun,
                     'neraca_debit': 0, 'neraca_kredit': 0,
                     'penyesuaian_debit': 0, 'penyesuaian_kredit': 0,
@@ -11661,22 +11871,23 @@ def neraca_lajur():
                     'saldo_nssp': 0
                 }
             
-            # Transaksi biasa ditambahkan ke Neraca Saldo
             akun_data[kode_akun]['neraca_debit'] += debit
             akun_data[kode_akun]['neraca_kredit'] += kredit
         
-        # 6. TAMBAHKAN PENYESUAIAN DARI JURNAL_PENYESUAIAN
+        # 7. TAMBAHKAN PENYESUAIAN
         for penyesuaian in penyesuaian_data:
             akun_nama = penyesuaian.get('nama_akun', 'Unknown')
             debit = float(penyesuaian.get('debit', 0) or 0)
             kredit = float(penyesuaian.get('kredit', 0) or 0)
             
-            # Cari kode akun
-            kode_akun = next((kode for kode, nama in akun_standar.items() if nama.lower() == akun_nama.lower()), akun_nama)
+            kode_akun, nama_normal = normalize_akun_data(akun_nama)
+            
+            if not kode_akun:
+                kode_akun = akun_nama
             
             if kode_akun not in akun_data:
                 akun_data[kode_akun] = {
-                    'nama_akun': akun_nama,
+                    'nama_akun': nama_normal,
                     'kode_akun': kode_akun,
                     'neraca_debit': 0, 'neraca_kredit': 0,
                     'penyesuaian_debit': 0, 'penyesuaian_kredit': 0,
@@ -11687,170 +11898,142 @@ def neraca_lajur():
                     'saldo_nssp': 0
                 }
             
-            # Penyesuaian ditambahkan ke kolom Penyesuaian
             akun_data[kode_akun]['penyesuaian_debit'] += debit
             akun_data[kode_akun]['penyesuaian_kredit'] += kredit
         
-        # 7. TENTUKAN TIPE AKUN DENGAN BENAR
+        # 8. TENTUKAN TIPE AKUN SESUAI CHART_OF_ACCOUNTS
         for kode_akun, data in akun_data.items():
-            nama_lower = data['nama_akun'].lower()
-            kode_str = str(data['kode_akun'])
-            kode_utama = kode_str[0] if kode_str and kode_str[0].isdigit() else '0'
-            
-            # LOGIKA PENENTUAN TIPE AKUN YANG BENAR
-            # Aset (kode 1) atau mengandung kata kunci aset
-            if kode_utama == '1' or any(keyword in nama_lower for keyword in [
-                'kas', 'bank', 'piutang', 'persediaan', 'perlengkapan', 'peralatan',
-                'kendaraan', 'gedung', 'tanah', 'bangunan', 'aset', 'akumulasi', 'depresiasi'
-            ]):
-                data['tipe_akun'] = 'asset'
-            
-            # Kewajiban (kode 2)
-            elif kode_utama == '2' or any(keyword in nama_lower for keyword in [
-                'utang', 'hutang', 'kewajiban', 'diterima dimuka', 'pendapatan diterima dimuka',
-                'biaya yang masih harus dibayar'
-            ]):
-                data['tipe_akun'] = 'liability'
-            
-            # Modal (kode 3)
-            elif kode_utama == '3' or any(keyword in nama_lower for keyword in [
-                'modal', 'ekuitas', 'prive', 'laba ditahan'
-            ]):
-                # Prive adalah kontra modal (pengurang modal)
-                if 'prive' in nama_lower or '312' in kode_str:
-                    data['tipe_akun'] = 'prive'
-                else:
+            # Cari di CHART_OF_ACCOUNTS terlebih dahulu
+            if kode_akun in CHART_OF_ACCOUNTS:
+                tipe_chart = CHART_OF_ACCOUNTS[kode_akun]['tipe']
+                if tipe_chart == "Aset Lancar" or tipe_chart == "Aset Tetap":
+                    data['tipe_akun'] = 'asset'
+                elif tipe_chart == "Utang":
+                    data['tipe_akun'] = 'liability'
+                elif tipe_chart == "Modal":
                     data['tipe_akun'] = 'equity'
-            
-            # Pendapatan (kode 4)
-            elif kode_utama == '4' or any(keyword in nama_lower for keyword in [
-                'pendapatan', 'penjualan', 'jasa', 'hasil', 'fee', 'komisi'
-            ]):
-                data['tipe_akun'] = 'income'
-            
-            # Beban (kode 5, 6)
-            elif kode_utama in ['5', '6'] or any(keyword in nama_lower for keyword in [
-                'beban', 'biaya', 'hpp', 'gaji', 'listrik', 'air', 'telepon', 'sewa',
-                'iklan', 'promosi', 'transportasi', 'pajak', 'administrasi'
-            ]):
-                data['tipe_akun'] = 'expense'
-            
+                elif tipe_chart == "Pendapatan":
+                    data['tipe_akun'] = 'income'
+                elif tipe_chart == "HPP":
+                    data['tipe_akun'] = 'expense'
+                elif tipe_chart == "Beban":
+                    data['tipe_akun'] = 'expense'
+                else:
+                    data['tipe_akun'] = 'other'
             else:
-                data['tipe_akun'] = 'other'
+                # Fallback berdasarkan nama
+                nama_lower = data['nama_akun'].lower()
+                if 'kas' in nama_lower or 'piutang' in nama_lower or 'persediaan' in nama_lower or 'perlengkapan' in nama_lower or 'tanah' in nama_lower or 'bangunan' in nama_lower or 'kendaraan' in nama_lower or 'peralatan' in nama_lower:
+                    data['tipe_akun'] = 'asset'
+                elif 'utang' in nama_lower or 'hutang' in nama_lower or 'diterima dimuka' in nama_lower:
+                    data['tipe_akun'] = 'liability'
+                elif 'modal' in nama_lower or 'prive' in nama_lower:
+                    data['tipe_akun'] = 'equity'
+                elif 'penjualan' in nama_lower or 'pendapatan' in nama_lower:
+                    data['tipe_akun'] = 'income'
+                elif 'hpp' in nama_lower or 'harga pokok' in nama_lower or 'pembelian' in nama_lower or 'beban' in nama_lower:
+                    data['tipe_akun'] = 'expense'
+                else:
+                    data['tipe_akun'] = 'other'
         
-        # 8. HITUNG NERACA SALDO SETELAH PENYESUAIAN (NSSP) DENGAN BENAR
+        # 9. HITUNG NERACA SALDO SETELAH PENYESUAIAN
         for kode_akun, data in akun_data.items():
-            # Hitung NSSP: NSA + Penyesuaian
-            nssp_debit = data['neraca_debit'] + data['penyesuaian_debit']
-            nssp_kredit = data['neraca_kredit'] + data['penyesuaian_kredit']
+            saldo_neraca = data['neraca_debit'] - data['neraca_kredit']
+            saldo_penyesuaian = data['penyesuaian_debit'] - data['penyesuaian_kredit']
+            saldo_nssp = saldo_neraca + saldo_penyesuaian
+            data['saldo_nssp'] = saldo_nssp
             
-            # Untuk akun normal debit (Aset, Beban, Prive)
-            if data['tipe_akun'] in ['asset', 'expense', 'prive']:
-                if nssp_debit >= nssp_kredit:
-                    data['nssp_debit'] = nssp_debit - nssp_kredit
-                    data['nssp_kredit'] = 0
-                    data['saldo_nssp'] = data['nssp_debit']
-                else:
-                    data['nssp_debit'] = 0
-                    data['nssp_kredit'] = nssp_kredit - nssp_debit
-                    data['saldo_nssp'] = -data['nssp_kredit']
-            
-            # Untuk akun normal kredit (Kewajiban, Modal, Pendapatan)
-            elif data['tipe_akun'] in ['liability', 'equity', 'income']:
-                if nssp_kredit >= nssp_debit:
-                    data['nssp_debit'] = 0
-                    data['nssp_kredit'] = nssp_kredit - nssp_debit
-                    data['saldo_nssp'] = -data['nssp_kredit']
-                else:
-                    data['nssp_debit'] = nssp_debit - nssp_kredit
-                    data['nssp_kredit'] = 0
-                    data['saldo_nssp'] = data['nssp_debit']
-            
+            # Tentukan posisi debit/kredit berdasarkan tipe akun dan saldo_normal
+            if kode_akun in CHART_OF_ACCOUNTS:
+                saldo_normal = CHART_OF_ACCOUNTS[kode_akun]['saldo_normal']
+                if saldo_normal == "debit":
+                    if saldo_nssp >= 0:
+                        data['nssp_debit'] = saldo_nssp
+                        data['nssp_kredit'] = 0
+                    else:
+                        data['nssp_debit'] = 0
+                        data['nssp_kredit'] = abs(saldo_nssp)
+                else:  # saldo_normal == "kredit"
+                    if saldo_nssp <= 0:
+                        data['nssp_debit'] = 0
+                        data['nssp_kredit'] = abs(saldo_nssp)
+                    else:
+                        data['nssp_debit'] = saldo_nssp
+                        data['nssp_kredit'] = 0
             else:
-                data['nssp_debit'] = nssp_debit
-                data['nssp_kredit'] = nssp_kredit
-                data['saldo_nssp'] = nssp_debit - nssp_kredit
+                # Fallback berdasarkan tipe_akun
+                if data['tipe_akun'] in ['asset', 'expense']:
+                    if saldo_nssp >= 0:
+                        data['nssp_debit'] = saldo_nssp
+                        data['nssp_kredit'] = 0
+                    else:
+                        data['nssp_debit'] = 0
+                        data['nssp_kredit'] = abs(saldo_nssp)
+                elif data['tipe_akun'] in ['liability', 'equity', 'income']:
+                    if saldo_nssp <= 0:
+                        data['nssp_debit'] = 0
+                        data['nssp_kredit'] = abs(saldo_nssp)
+                    else:
+                        data['nssp_debit'] = saldo_nssp
+                        data['nssp_kredit'] = 0
+                else:
+                    if saldo_nssp >= 0:
+                        data['nssp_debit'] = saldo_nssp
+                        data['nssp_kredit'] = 0
+                    else:
+                        data['nssp_debit'] = 0
+                        data['nssp_kredit'] = abs(saldo_nssp)
         
-        # 9. KLASIFIKASI KE LABA RUGI DAN POSISI KEUANGAN (NERACA)
-        # Reset semua laba rugi dan posisi keuangan
+        # 10. KLASIFIKASI UNTUK LAPORAN
         for kode_akun, data in akun_data.items():
             data['laba_rugi_debit'] = 0
             data['laba_rugi_kredit'] = 0
             data['posisi_keuangan_debit'] = 0
             data['posisi_keuangan_kredit'] = 0
         
-        # Pisahkan akun nominal (Laba Rugi) dan real (Neraca)
         akun_nominal = {}  # Pendapatan dan Beban (Laba Rugi)
         akun_real = {}     # Aset, Kewajiban, Modal (Neraca)
         
         for kode_akun, data in akun_data.items():
             if data['tipe_akun'] == 'income':
-                # Pendapatan masuk ke kredit laba rugi
                 akun_nominal[kode_akun] = data
-                data['laba_rugi_kredit'] = abs(data['saldo_nssp']) if data['saldo_nssp'] < 0 else 0
-                data['laba_rugi_debit'] = data['saldo_nssp'] if data['saldo_nssp'] > 0 else 0
-            
+                data['laba_rugi_kredit'] = data['nssp_kredit']
+                data['laba_rugi_debit'] = data['nssp_debit']
             elif data['tipe_akun'] == 'expense':
-                # Beban masuk ke debit laba rugi
                 akun_nominal[kode_akun] = data
-                data['laba_rugi_debit'] = data['saldo_nssp'] if data['saldo_nssp'] > 0 else 0
-                data['laba_rugi_kredit'] = abs(data['saldo_nssp']) if data['saldo_nssp'] < 0 else 0
-            
+                data['laba_rugi_debit'] = data['nssp_debit']
+                data['laba_rugi_kredit'] = data['nssp_kredit']
             else:
-                # Aset, Kewajiban, Modal masuk ke posisi keuangan
                 akun_real[kode_akun] = data
-                if data['saldo_nssp'] > 0:
-                    data['posisi_keuangan_debit'] = data['saldo_nssp']
-                elif data['saldo_nssp'] < 0:
-                    data['posisi_keuangan_kredit'] = abs(data['saldo_nssp'])
+                data['posisi_keuangan_debit'] = data['nssp_debit']
+                data['posisi_keuangan_kredit'] = data['nssp_kredit']
         
-        # 10. HITUNG LABA RUGI BERSIH
-        total_laba_rugi_debit = sum(data['laba_rugi_debit'] for data in akun_nominal.values())
-        total_laba_rugi_kredit = sum(data['laba_rugi_kredit'] for data in akun_nominal.values())
-        laba_rugi_bersih = total_laba_rugi_kredit - total_laba_rugi_debit
+        # 11. HITUNG LABA RUGI BERSIH
+        total_pendapatan = sum(data['laba_rugi_kredit'] for data in akun_nominal.values() 
+                              if data['tipe_akun'] == 'income')
+        total_beban = sum(data['laba_rugi_debit'] for data in akun_nominal.values() 
+                         if data['tipe_akun'] == 'expense')
         
-        # 11. TAMBAHKAN LABA/RUGI KE MODAL DALAM POSISI KEUANGAN
-        # Cari akun modal (bukan prive)
+        laba_rugi_bersih = total_pendapatan - total_beban
+        
+        # 12. TAMBAHKAN LABA/RUGI KE MODAL (SESUAI STANDAR AKUNTANSI)
         modal_key = None
         for kode_akun, data in akun_real.items():
-            if data['tipe_akun'] == 'equity' and 'modal' in data['nama_akun'].lower():
+            if kode_akun == '3110':  # Modal Pemilik
                 modal_key = kode_akun
                 break
         
         if not modal_key:
-            # Coba cari berdasarkan kode
             for kode_akun, data in akun_real.items():
-                if data['tipe_akun'] == 'equity':
+                if data['tipe_akun'] == 'equity' and 'modal' in data['nama_akun'].lower():
                     modal_key = kode_akun
                     break
         
-        if modal_key and laba_rugi_bersih != 0:
-            # Tambahkan laba/rugi ke modal
-            if laba_rugi_bersih > 0:  # Laba (menambah modal)
+        if modal_key:
+            if laba_rugi_bersih > 0:  # Laba
                 akun_real[modal_key]['posisi_keuangan_kredit'] += laba_rugi_bersih
-                akun_real[modal_key]['saldo_nssp'] -= laba_rugi_bersih  # Karena saldo modal negatif (kredit)
-            else:  # Rugi (mengurangi modal)
-                rugi_abs = abs(laba_rugi_bersih)
-                akun_real[modal_key]['posisi_keuangan_debit'] += rugi_abs
-                akun_real[modal_key]['saldo_nssp'] += rugi_abs  # Karena saldo modal negatif (kredit)
-        
-        # 12. BUAT AKUN LABA RUGI BERSIH JIKA PERLU UNTUK DISPLAY
-        if laba_rugi_bersih != 0:
-            kode_laba_rugi = "9998" if laba_rugi_bersih > 0 else "9999"
-            nama_laba_rugi = "Laba Bersih" if laba_rugi_bersih > 0 else "Rugi Bersih"
-            
-            akun_data[kode_laba_rugi] = {
-                'nama_akun': nama_laba_rugi,
-                'kode_akun': kode_laba_rugi,
-                'neraca_debit': 0, 'neraca_kredit': 0,
-                'penyesuaian_debit': 0, 'penyesuaian_kredit': 0,
-                'nssp_debit': 0, 'nssp_kredit': 0,
-                'laba_rugi_debit': abs(laba_rugi_bersih) if laba_rugi_bersih < 0 else 0,
-                'laba_rugi_kredit': laba_rugi_bersih if laba_rugi_bersih > 0 else 0,
-                'posisi_keuangan_debit': 0, 'posisi_keuangan_kredit': 0,
-                'tipe_akun': 'laba_rugi_bersih',
-                'saldo_nssp': 0
-            }
+            elif laba_rugi_bersih < 0:  # Rugi
+                akun_real[modal_key]['posisi_keuangan_debit'] += abs(laba_rugi_bersih)
         
         # 13. HITUNG TOTAL UNTUK SETIAP KOLOM
         totals = {
@@ -11870,21 +12053,28 @@ def neraca_lajur():
         is_nssp_balanced = abs(totals['nssp_debit'] - totals['nssp_kredit']) < 0.01
         is_final_balanced = abs(totals['posisi_keuangan_debit'] - totals['posisi_keuangan_kredit']) < 0.01
         
-        # 15. URUTKAN AKUN
-        def sort_akun_items(akun_items):
-            tipe_order = {
-                'asset': 1, 'liability': 2, 'equity': 3, 'prive': 4,
-                'income': 5, 'expense': 6, 'laba_rugi_bersih': 7, 'other': 8
-            }
-            return sorted(
-                akun_items,
-                key=lambda x: (
-                    tipe_order.get(x[1].get('tipe_akun', 'other'), 99),
-                    str(x[1].get('kode_akun', ''))
-                )
-            )
+        # 15. URUTKAN AKUN SESUAI CHART_OF_ACCOUNTS
+        def get_sort_key(item):
+            kode_akun = item[0]
+            data = item[1]
+            
+            # Urut berdasarkan: kategori → kode akun
+            if kode_akun in CHART_OF_ACCOUNTS:
+                tipe_chart = CHART_OF_ACCOUNTS[kode_akun]['tipe']
+                order_map = {
+                    "Aset Lancar": 1,
+                    "Aset Tetap": 2,
+                    "Utang": 3,
+                    "Modal": 4,
+                    "Pendapatan": 5,
+                    "HPP": 6,
+                    "Beban": 7
+                }
+                return (order_map.get(tipe_chart, 99), kode_akun)
+            else:
+                return (99, kode_akun)
         
-        akun_terurut = sort_akun_items(akun_data.items())
+        akun_terurut = sorted(akun_data.items(), key=get_sort_key)
         
         # 16. FUNGSI FORMAT CURRENCY
         def rp(val):
@@ -11892,41 +12082,116 @@ def neraca_lajur():
                 val_float = float(val)
                 if abs(val_float) < 0.01:
                     return "-"
-                return f"Rp {int(val_float):,}".replace(",", ".")
+                return f"Rp {val_float:,.0f}".replace(",", ".")
             except:
                 return "-"
         
         # 17. GENERATE TABLE ROWS
         rows_html = ""
-        for kode_akun, data in akun_terurut:
-            # Hanya tampilkan akun yang memiliki nilai
-            if any(data[key] for key in ['neraca_debit', 'neraca_kredit', 
-                                        'penyesuaian_debit', 'penyesuaian_kredit',
-                                        'nssp_debit', 'nssp_kredit',
-                                        'laba_rugi_debit', 'laba_rugi_kredit',
-                                        'posisi_keuangan_debit', 'posisi_keuangan_kredit']):
-                
-                tipe_class = data.get('tipe_akun', '')
-                if tipe_class == 'laba_rugi_bersih':
-                    tipe_class = 'equity'
-                
-                rows_html += f"""
-                <tr class="{tipe_class}">
-                    <td class="akun-name">{data['kode_akun']} - {data['nama_akun']}</td>
-                    <td class="number">{rp(data['neraca_debit'])}</td>
-                    <td class="number">{rp(data['neraca_kredit'])}</td>
-                    <td class="number">{rp(data['penyesuaian_debit'])}</td>
-                    <td class="number">{rp(data['penyesuaian_kredit'])}</td>
-                    <td class="number"><strong>{rp(data['nssp_debit'])}</strong></td>
-                    <td class="number"><strong>{rp(data['nssp_kredit'])}</strong></td>
-                    <td class="number">{rp(data['laba_rugi_debit'])}</td>
-                    <td class="number">{rp(data['laba_rugi_kredit'])}</td>
-                    <td class="number">{rp(data['posisi_keuangan_debit'])}</td>
-                    <td class="number">{rp(data['posisi_keuangan_kredit'])}</td>
-                </tr>
-                """
+        row_counter = 0
         
-        # 18. GENERATE HTML LENGKAP
+        for kode_akun, data in akun_terurut:
+            row_counter += 1
+            
+            # Hanya tampilkan akun yang memiliki nilai
+            if (data['neraca_debit'] == 0 and data['neraca_kredit'] == 0 and
+                data['penyesuaian_debit'] == 0 and data['penyesuaian_kredit'] == 0 and
+                data['nssp_debit'] == 0 and data['nssp_kredit'] == 0):
+                continue
+            
+            tipe_class = data.get('tipe_akun', '')
+            
+            # Tentukan warna berdasarkan tipe akun dari CHART_OF_ACCOUNTS
+            color_class = ""
+            if kode_akun in CHART_OF_ACCOUNTS:
+                tipe_chart = CHART_OF_ACCOUNTS[kode_akun]['tipe']
+                if tipe_chart in ["Aset Lancar", "Aset Tetap"]:
+                    color_class = "asset"
+                elif tipe_chart == "Utang":
+                    color_class = "liability"
+                elif tipe_chart == "Modal":
+                    if kode_akun == "3210":  # Prive
+                        color_class = "prive"
+                    else:
+                        color_class = "equity"
+                elif tipe_chart == "Pendapatan":
+                    color_class = "income"
+                elif tipe_chart in ["HPP", "Beban"]:
+                    color_class = "expense"
+            else:
+                color_class = tipe_class
+            
+            rows_html += f"""
+            <tr class="{color_class}">
+                <td class="akun-name">
+                    <span class="akun-kode">{data['kode_akun']}</span>
+                    <span class="akun-nama">{data['nama_akun']}</span>
+                </td>
+                <td class="number debit-col">{rp(data['neraca_debit'])}</td>
+                <td class="number kredit-col">{rp(data['neraca_kredit'])}</td>
+                <td class="number debit-col">{rp(data['penyesuaian_debit'])}</td>
+                <td class="number kredit-col">{rp(data['penyesuaian_kredit'])}</td>
+                <td class="number nssp-debit-col"><strong>{rp(data['nssp_debit'])}</strong></td>
+                <td class="number nssp-kredit-col"><strong>{rp(data['nssp_kredit'])}</strong></td>
+                <td class="number lr-debit-col">{rp(data['laba_rugi_debit'])}</td>
+                <td class="number lr-kredit-col">{rp(data['laba_rugi_kredit'])}</td>
+                <td class="number nk-debit-col">{rp(data['posisi_keuangan_debit'])}</td>
+                <td class="number nk-kredit-col">{rp(data['posisi_keuangan_kredit'])}</td>
+            </tr>
+            """
+        
+        # 18. GENERATE FOOTER
+        footer_html = f"""
+        <tr class="total-row">
+            <td><strong>📊 TOTAL</strong></td>
+            <td class="number debit-col"><strong>{rp(totals['neraca_debit'])}</strong></td>
+            <td class="number kredit-col"><strong>{rp(totals['neraca_kredit'])}</strong></td>
+            <td class="number debit-col"><strong>{rp(totals['penyesuaian_debit'])}</strong></td>
+            <td class="number kredit-col"><strong>{rp(totals['penyesuaian_kredit'])}</strong></td>
+            <td class="number nssp-debit-col"><strong>{rp(totals['nssp_debit'])}</strong></td>
+            <td class="number nssp-kredit-col"><strong>{rp(totals['nssp_kredit'])}</strong></td>
+            <td class="number lr-debit-col"><strong>{rp(totals['laba_rugi_debit'])}</strong></td>
+            <td class="number lr-kredit-col"><strong>{rp(totals['laba_rugi_kredit'])}</strong></td>
+            <td class="number nk-debit-col"><strong>{rp(totals['posisi_keuangan_debit'])}</strong></td>
+            <td class="number nk-kredit-col"><strong>{rp(totals['posisi_keuangan_kredit'])}</strong></td>
+        </tr>
+        
+        <tr class="laba-rugi-row">
+            <td><strong>💰 LABA RUGI BERSIH</strong></td>
+            <td colspan="4" style="text-align: left; padding-left: 20px;">
+                <div style="display: inline-block; text-align: left;">
+                    <div>Pendapatan: {rp(total_pendapatan)}</div>
+                    <div>Beban: ({rp(total_beban)})</div>
+                </div>
+            </td>
+            <td colspan="2" class="number {'laba' if laba_rugi_bersih >= 0 else 'rugi'}">
+                <strong>{rp(abs(laba_rugi_bersih))}</strong>
+            </td>
+            <td colspan="4" class="number {'laba' if laba_rugi_bersih >= 0 else 'rugi'}">
+                <strong>{rp(abs(laba_rugi_bersih))} {'(Laba)' if laba_rugi_bersih >= 0 else '(Rugi)'}</strong>
+            </td>
+        </tr>
+        
+        <tr class="balance-row">
+            <td><strong>⚖ STATUS KESEIMBANGAN</strong></td>
+            <td colspan="2" class="number {'success' if is_neraca_balanced else 'danger'}">
+                <i class="fas fa-{'check-circle' if is_neraca_balanced else 'times-circle'}"></i>
+                {'SEIMBANG' if is_neraca_balanced else 'TIDAK SEIMBANG'}
+            </td>
+            <td colspan="2" class="number {'success' if is_nssp_balanced else 'danger'}">
+                <i class="fas fa-{'check-circle' if is_nssp_balanced else 'times-circle'}"></i>
+                {'SEIMBANG' if is_nssp_balanced else 'TIDAK SEIMBANG'}
+            </td>
+            <td colspan="2"></td>
+            <td colspan="4" class="number {'success' if is_final_balanced else 'danger'}">
+                <i class="fas fa-{'check-circle' if is_final_balanced else 'times-circle'}"></i>
+                {'NERACA SEIMBANG' if is_final_balanced else 'NERACA TIDAK SEIMBANG'}
+            </td>
+        </tr>
+        """
+        
+        # 19. GENERATE HTML DENGAN STYLING PINK
+        # (CSS tetap sama seperti sebelumnya, hanya logika yang diubah)
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -11934,421 +12199,317 @@ def neraca_lajur():
             <title>Neraca Lajur - PINKILANG</title>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
             <style>
+                /* CSS TEMA PINK (sama seperti sebelumnya) */
+                :root {{
+                    --pink-light: #fff0f5;
+                    --pink-medium: #ffb6c1;
+                    --pink-dark: #ff69b4;
+                    --pink-darker: #ff1493;
+                    --pink-gradient: linear-gradient(135deg, #ffb6c1 0%, #ff69b4 100%);
+                }}
+                
                 * {{
-                    margin: 0;
-                    padding: 0;
-                    box-sizing: border-box;
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    margin: 0; padding: 0; box-sizing: border-box;
+                    font-family: 'Segoe UI', 'Poppins', sans-serif;
                 }}
                 
                 body {{
                     background: linear-gradient(135deg, #ffe6f2 0%, #ffccdd 100%);
-                    padding: 20px;
                     min-height: 100vh;
+                    padding: 20px;
                 }}
                 
                 .container {{
-                    max-width: 95vw;
+                    max-width: 98vw;
                     margin: 0 auto;
                     background: white;
-                    border-radius: 20px;
-                    box-shadow: 0 15px 35px rgba(255, 105, 180, 0.2);
+                    border-radius: 25px;
+                    box-shadow: 0 20px 40px rgba(255, 105, 180, 0.2);
                     overflow: hidden;
-                    border: 1px solid #ffb3d9;
+                    border: 2px solid #ffb3d9;
                 }}
                 
-                /* HEADER STYLE */
                 .header {{
-                    background: linear-gradient(135deg, #ff66b2 0%, #ff3385 100%);
+                    background: var(--pink-gradient);
                     color: white;
-                    padding: 25px 30px;
+                    padding: 30px 40px;
                     text-align: center;
-                    position: sticky;
-                    left: 0;
-                    z-index: 100;
                 }}
                 
                 .back-btn {{
-                    display: inline-block;
-                    padding: 10px 20px;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 12px 25px;
                     background: rgba(255, 255, 255, 0.2);
                     color: white;
                     text-decoration: none;
-                    border-radius: 10px;
-                    margin-bottom: 15px;
-                    border: 1px solid rgba(255, 255, 255, 0.3);
+                    border-radius: 15px;
+                    margin-bottom: 20px;
+                    border: 2px solid rgba(255, 255, 255, 0.3);
                     transition: all 0.3s ease;
-                    font-weight: 500;
+                    font-weight: 600;
                 }}
                 
                 .back-btn:hover {{
                     background: rgba(255, 255, 255, 0.3);
-                    transform: translateY(-2px);
+                    transform: translateY(-3px);
+                    box-shadow: 0 8px 20px rgba(255, 255, 255, 0.2);
                 }}
                 
                 h1 {{
-                    font-size: 32px;
-                    margin-bottom: 10px;
-                    font-weight: 600;
-                }}
-                
-                .subtitle {{
-                    font-size: 14px;
-                    opacity: 0.9;
-                    margin-top: 5px;
+                    font-size: 36px;
+                    margin-bottom: 15px;
+                    font-weight: 800;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 15px;
                 }}
                 
                 .content {{
-                    padding: 25px;
-                    overflow-x: auto;
-                }}
-                
-                /* STATUS BOX */
-                .status-box {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 15px;
-                    margin: 25px 0;
-                }}
-                
-                .status-item {{
-                    padding: 20px;
-                    border-radius: 15px;
-                    text-align: center;
-                    background: #fff5f9;
-                    border: 2px solid #ffccdd;
-                    transition: all 0.3s ease;
-                }}
-                
-                .status-item:hover {{
-                    transform: translateY(-5px);
-                    box-shadow: 0 8px 20px rgba(255, 182, 193, 0.2);
-                }}
-                
-                .status-value {{
-                    font-size: 24px;
-                    font-weight: bold;
-                    margin-bottom: 8px;
-                }}
-                
-                .status-label {{
-                    font-size: 13px;
-                    color: #ff6699;
-                    font-weight: 600;
-                }}
-                
-                /* LEGEND */
-                .legend {{
-                    margin: 20px 0;
-                    padding: 15px 20px;
-                    background: #fff5f9;
-                    border-radius: 15px;
-                    font-size: 13px;
-                    border: 2px solid #ffccdd;
-                }}
-                
-                .legend-item {{
-                    display: inline-block;
-                    margin-right: 20px;
-                }}
-                
-                .color-box {{
-                    display: inline-block;
-                    width: 15px;
-                    height: 15px;
-                    margin-right: 8px;
-                    border-radius: 4px;
+                    padding: 40px;
                 }}
                 
                 /* TABLE STYLING */
+                .table-container {{
+                    overflow-x: auto;
+                    margin: 30px 0;
+                    border-radius: 20px;
+                    box-shadow: 0 10px 30px rgba(255, 105, 180, 0.1);
+                    border: 2px solid #ffebf0;
+                }}
+                
                 .worksheet-table {{
                     width: 100%;
                     border-collapse: collapse;
-                    font-size: 13px;
-                    min-width: 1300px;
-                    border-radius: 15px;
-                    overflow: hidden;
-                    box-shadow: 0 8px 20px rgba(255, 182, 193, 0.15);
+                    font-size: 14px;
+                    min-width: 1400px;
                 }}
                 
                 .worksheet-table thead {{
-                    background: linear-gradient(135deg, #ff66b2 0%, #ff3385 100%);
+                    background: var(--pink-gradient);
                     position: sticky;
                     top: 0;
                 }}
                 
                 .worksheet-table th {{
-                    padding: 16px 10px;
+                    padding: 20px 15px;
                     text-align: center;
                     color: white;
-                    font-weight: 600;
-                    font-size: 12px;
-                    border-right: 1px solid rgba(255, 255, 255, 0.3);
-                    white-space: nowrap;
-                }}
-                
-                .worksheet-table th:last-child {{
-                    border-right: none;
+                    font-weight: 700;
+                    font-size: 13px;
+                    border-right: 1px solid rgba(255, 255, 255, 0.2);
                 }}
                 
                 .worksheet-table td {{
-                    padding: 14px 10px;
-                    border-bottom: 1px solid #ffe6f2;
-                    color: #333;
-                }}
-                
-                .worksheet-table tbody tr:hover {{
-                    background: #fff5f9 !important;
+                    padding: 18px 15px;
+                    border-bottom: 1px solid #ffebf0;
                 }}
                 
                 /* WARNA BERDASARKAN TIPE AKUN */
-                .worksheet-table tbody tr.asset td:first-child {{
-                    border-left: 5px solid #ff66b2;
-                    background: linear-gradient(90deg, rgba(255, 102, 178, 0.05) 0%, transparent 100%);
+                .asset td:first-child {{
+                    border-left: 6px solid #ff69b4;
+                    background: linear-gradient(90deg, rgba(255, 105, 180, 0.1) 0%, transparent 100%);
                 }}
                 
-                .worksheet-table tbody tr.liability td:first-child {{
-                    border-left: 5px solid #ff3385;
-                    background: linear-gradient(90deg, rgba(255, 51, 133, 0.05) 0%, transparent 100%);
+                .liability td:first-child {{
+                    border-left: 6px solid #ff1493;
+                    background: linear-gradient(90deg, rgba(255, 20, 147, 0.1) 0%, transparent 100%);
                 }}
                 
-                .worksheet-table tbody tr.equity td:first-child {{
-                    border-left: 5px solid #ff0080;
-                    background: linear-gradient(90deg, rgba(255, 0, 128, 0.05) 0%, transparent 100%);
+                .equity td:first-child {{
+                    border-left: 6px solid #db7093;
+                    background: linear-gradient(90deg, rgba(219, 112, 147, 0.1) 0%, transparent 100%);
                 }}
                 
-                .worksheet-table tbody tr.income td:first-child {{
-                    border-left: 5px solid #ff6699;
-                    background: linear-gradient(90deg, rgba(255, 102, 153, 0.05) 0%, transparent 100%);
+                .prive td:first-child {{
+                    border-left: 6px solid #c71585;
+                    background: linear-gradient(90deg, rgba(199, 21, 133, 0.1) 0%, transparent 100%);
                 }}
                 
-                .worksheet-table tbody tr.expense td:first-child {{
-                    border-left: 5px solid #ff1a75;
-                    background: linear-gradient(90deg, rgba(255, 26, 117, 0.05) 0%, transparent 100%);
+                .income td:first-child {{
+                    border-left: 6px solid #ffb6c1;
+                    background: linear-gradient(90deg, rgba(255, 182, 193, 0.1) 0%, transparent 100%);
                 }}
                 
-                .worksheet-table tfoot {{
-                    font-weight: bold;
+                .expense td:first-child {{
+                    border-left: 6px solid #ff7eb9;
+                    background: linear-gradient(90deg, rgba(255, 126, 185, 0.1) 0%, transparent 100%);
                 }}
                 
-                .worksheet-table tfoot td {{
-                    padding: 18px 10px;
-                    border-bottom: 1px solid #ffe6f2;
-                    background: #fff5f9;
-                }}
-                
-                /* COLUMN STYLES */
                 .akun-name {{
-                    font-weight: 600;
-                    background: #fff5f9;
+                    font-weight: 700;
                     position: sticky;
                     left: 0;
-                    min-width: 220px;
+                    min-width: 250px;
                     z-index: 5;
-                    color: #ff3385;
+                    background: white;
+                    display: flex;
+                    flex-direction: column;
+                }}
+                
+                .akun-kode {{
+                    color: var(--pink-darker);
+                    font-size: 13px;
+                }}
+                
+                .akun-nama {{
+                    color: #333;
+                    font-size: 14px;
+                    margin-top: 3px;
                 }}
                 
                 .number {{
                     text-align: right;
-                    font-family: 'Courier New', monospace;
-                    font-size: 12px;
-                    min-width: 110px;
-                    font-weight: 500;
+                    font-family: 'JetBrains Mono', 'Courier New', monospace;
+                    font-size: 13px;
+                    min-width: 120px;
                 }}
                 
-                .column-group {{
-                    background: rgba(255, 102, 178, 0.15);
+                .debit-col {{ color: #ff1493; }}
+                .kredit-col {{ color: #ff69b4; }}
+                .nssp-debit-col {{ background: rgba(255, 105, 180, 0.1); font-weight: 700; color: #ff1493; }}
+                .nssp-kredit-col {{ background: rgba(255, 20, 147, 0.1); font-weight: 700; color: #ff69b4; }}
+                
+                /* FOOTER STYLES */
+                .total-row td {{
+                    background: #fff5f7;
+                    font-weight: bold;
+                    border-top: 3px solid var(--pink-medium);
                 }}
                 
-                /* BUTTONS */
+                .laba-rugi-row td {{
+                    background: #f0fff4;
+                    border-left: 6px solid #4CAF50;
+                }}
+                
+                .balance-row td {{
+                    background: #fff8e1;
+                    border-left: 6px solid #FF9800;
+                }}
+                
+                .laba {{ color: #4CAF50; font-weight: 800; }}
+                .rugi {{ color: #f44336; font-weight: 800; }}
+                .success {{ color: #4CAF50; }}
+                .danger {{ color: #f44336; }}
+                
+                /* ACTION BUTTONS */
                 .action-buttons {{
-                    text-align: center;
-                    margin-top: 35px;
-                    padding-top: 25px;
-                    border-top: 2px dashed #ffccdd;
                     display: flex;
-                    gap: 12px;
-                    justify-content: center;
                     flex-wrap: wrap;
+                    gap: 15px;
+                    justify-content: center;
+                    margin-top: 40px;
+                    padding-top: 30px;
+                    border-top: 2px dashed var(--pink-medium);
                 }}
                 
                 .btn {{
-                    display: inline-block;
-                    padding: 14px 25px;
-                    background: #ff66b2;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 15px 25px;
+                    background: var(--pink-gradient);
                     color: white;
                     text-decoration: none;
-                    border-radius: 12px;
+                    border-radius: 15px;
                     transition: all 0.3s ease;
-                    font-weight: 600;
+                    font-weight: 700;
                     border: none;
                     cursor: pointer;
-                    font-size: 14px;
-                    box-shadow: 0 4px 12px rgba(255, 102, 178, 0.3);
                 }}
                 
                 .btn:hover {{
                     transform: translateY(-3px);
-                    box-shadow: 0 6px 18px rgba(255, 102, 178, 0.4);
-                }}
-                
-                .btn-primary {{ 
-                    background: linear-gradient(135deg, #ff66b2 0%, #ff3385 100%);
-                }}
-                
-                .btn-info {{ 
-                    background: linear-gradient(135deg, #ff99cc 0%, #ff66b2 100%);
-                }}
-                
-                .btn-success {{ 
-                    background: linear-gradient(135deg, #ff6699 0%, #ff3385 100%);
-                }}
-                
-                .btn-warning {{ 
-                    background: linear-gradient(135deg, #ffccdd 0%, #ff99bb 100%);
-                    color: #ff3385;
-                }}
-                
-                /* LABA RUGI STYLE */
-                .laba {{
-                    color: #00cc66;
-                    font-weight: bold;
-                }}
-                
-                .rugi {{
-                    color: #ff3333;
-                    font-weight: bold;
-                }}
-                
-                /* SUCCESS/DANGER COLORS */
-                .success {{
-                    color: #00cc66;
-                }}
-                
-                .danger {{
-                    color: #ff3333;
-                }}
-                
-                /* RESPONSIVE */
-                @media (max-width: 768px) {{
-                    .container {{
-                        margin: 10px;
-                        border-radius: 15px;
-                    }}
-                    
-                    .header {{
-                        padding: 20px 15px;
-                    }}
-                    
-                    h1 {{
-                        font-size: 24px;
-                    }}
-                    
-                    .content {{
-                        padding: 15px;
-                    }}
-                    
-                    .worksheet-table {{
-                        font-size: 11px;
-                    }}
-                    
-                    .worksheet-table th,
-                    .worksheet-table td {{
-                        padding: 10px 6px;
-                    }}
-                    
-                    .akun-name {{
-                        min-width: 180px;
-                    }}
-                    
-                    .number {{
-                        min-width: 90px;
-                    }}
-                    
-                    .action-buttons {{
-                        flex-direction: column;
-                    }}
-                    
-                    .btn {{
-                        width: 100%;
-                        margin: 3px 0;
-                    }}
-                    
-                    .legend {{
-                        font-size: 11px;
-                    }}
-                    
-                    .legend-item {{
-                        margin-right: 10px;
-                        margin-bottom: 5px;
-                    }}
+                    box-shadow: 0 10px 25px rgba(255, 105, 180, 0.4);
                 }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <a href="/dashboard" class="back-btn">← Kembali ke Dashboard</a>
-                    <h1>📊 Neraca Lajur (Worksheet)</h1>
-                    <div class="subtitle">
-                        Login sebagai: <strong>{user_email}</strong> | 
-                        Transaksi: <strong>{len(jurnal_data)}</strong> | 
-                        Penyesuaian: <strong>{len(penyesuaian_data)}</strong> | 
-                        Akun: <strong>{len(akun_data)}</strong>
+                    <a href="/dashboard" class="back-btn">
+                        <i class="fas fa-arrow-left"></i> Kembali ke Dashboard
+                    </a>
+                    <h1>
+                        <i class="fas fa-table"></i>
+                        Neraca Lajur (Worksheet)
+                        <i class="fas fa-table"></i>
+                    </h1>
+                    <div style="display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-top: 15px;">
+                        <span style="background: rgba(255,255,255,0.2); padding: 8px 18px; border-radius: 20px;">
+                            <i class="fas fa-user"></i> {user_email}
+                        </span>
+                        <span style="background: rgba(255,255,255,0.2); padding: 8px 18px; border-radius: 20px;">
+                            <i class="fas fa-exchange-alt"></i> {len(jurnal_data)} Transaksi
+                        </span>
+                        <span style="background: rgba(255,255,255,0.2); padding: 8px 18px; border-radius: 20px;">
+                            <i class="fas fa-cog"></i> {len(penyesuaian_data)} Penyesuaian
+                        </span>
                     </div>
                 </div>
                 
                 <div class="content">
-                    <!-- Status Box -->
-                    <div class="status-box">
-                        <div class="status-item">
-                            <div class="status-value {'success' if is_neraca_balanced else 'danger'}">
+                    <!-- STATUS INFO -->
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 30px 0;">
+                        <div style="background: white; padding: 25px; border-radius: 20px; text-align: center; box-shadow: 0 8px 25px rgba(255,182,193,0.15); border: 2px solid #ffccdd;">
+                            <div style="font-size: 32px; font-weight: 800; margin-bottom: 10px; color: {'#4CAF50' if is_neraca_balanced else '#f44336'}">
                                 {'✅' if is_neraca_balanced else '❌'}
                             </div>
-                            <div class="status-label">Neraca Saldo</div>
+                            <div style="font-size: 15px; color: #666; font-weight: 600;">Neraca Saldo</div>
                         </div>
-                        <div class="status-item">
-                            <div class="status-value {'success' if is_nssp_balanced else 'danger'}">
+                        
+                        <div style="background: white; padding: 25px; border-radius: 20px; text-align: center; box-shadow: 0 8px 25px rgba(255,182,193,0.15); border: 2px solid #ffccdd;">
+                            <div style="font-size: 32px; font-weight: 800; margin-bottom: 10px; color: {'#4CAF50' if is_nssp_balanced else '#f44336'}">
                                 {'✅' if is_nssp_balanced else '❌'}
                             </div>
-                            <div class="status-label">NSSP</div>
+                            <div style="font-size: 15px; color: #666; font-weight: 600;">NSSP</div>
                         </div>
-                        <div class="status-item">
-                            <div class="status-value {'laba' if laba_rugi_bersih >= 0 else 'rugi'}">
+                        
+                        <div style="background: white; padding: 25px; border-radius: 20px; text-align: center; box-shadow: 0 8px 25px rgba(255,182,193,0.15); border: 2px solid #ffccdd;">
+                            <div style="font-size: 32px; font-weight: 800; margin-bottom: 10px; {'laba' if laba_rugi_bersih >= 0 else 'rugi'}">
                                 {rp(abs(laba_rugi_bersih))}
                             </div>
-                            <div class="status-label">{'Laba' if laba_rugi_bersih >= 0 else 'Rugi'} Bersih</div>
+                            <div style="font-size: 15px; color: #666; font-weight: 600;">{'Laba' if laba_rugi_bersih >= 0 else 'Rugi'} Bersih</div>
                         </div>
-                        <div class="status-item">
-                            <div class="status-value {'success' if is_final_balanced else 'danger'}">
+                        
+                        <div style="background: white; padding: 25px; border-radius: 20px; text-align: center; box-shadow: 0 8px 25px rgba(255,182,193,0.15); border: 2px solid #ffccdd;">
+                            <div style="font-size: 32px; font-weight: 800; margin-bottom: 10px; color: {'#4CAF50' if is_final_balanced else '#f44336'}">
                                 {'✅' if is_final_balanced else '❌'}
                             </div>
-                            <div class="status-label">Final Balance</div>
+                            <div style="font-size: 15px; color: #666; font-weight: 600;">Neraca Akhir</div>
                         </div>
                     </div>
                     
-                    <!-- Legend -->
-                    <div class="legend">
-                        <strong>🎨 Keterangan Warna:</strong>
-                        <span class="legend-item"><span class="color-box" style="background: #ff66b2;"></span> Aset</span>
-                        <span class="legend-item"><span class="color-box" style="background: #ff3385;"></span> Kewajiban</span>
-                        <span class="legend-item"><span class="color-box" style="background: #ff0080;"></span> Modal & Prive</span>
-                        <span class="legend-item"><span class="color-box" style="background: #ff6699;"></span> Pendapatan</span>
-                        <span class="legend-item"><span class="color-box" style="background: #ff1a75;"></span> Beban</span>
-                    </div>
-                    
-                    <!-- Worksheet Table -->
-                    <div style="overflow-x: auto;">
+                    <!-- WORKSHEET TABLE -->
+                    <div class="table-container">
                         <table class="worksheet-table">
                             <thead>
                                 <tr>
-                                    <th rowspan="2">Kode & Nama Akun</th>
-                                    <th colspan="2" class="column-group">Neraca Saldo</th>
-                                    <th colspan="2" class="column-group">Penyesuaian</th>
-                                    <th colspan="2" class="column-group">NSSP</th>
-                                    <th colspan="2" class="column-group">Laba Rugi</th>
-                                    <th colspan="2" class="column-group">Posisi Keuangan</th>
+                                    <th rowspan="2" style="min-width: 250px;">
+                                        <i class="fas fa-hashtag"></i> Kode & Nama Akun
+                                    </th>
+                                    <th colspan="2">
+                                        <i class="fas fa-book"></i> Neraca Saldo<br>
+                                        <small>Awal + Transaksi</small>
+                                    </th>
+                                    <th colspan="2">
+                                        <i class="fas fa-adjust"></i> Penyesuaian
+                                    </th>
+                                    <th colspan="2">
+                                        <i class="fas fa-calculator"></i> NSSP<br>
+                                        <small>Setelah Penyesuaian</small>
+                                    </th>
+                                    <th colspan="2">
+                                        <i class="fas fa-chart-pie"></i> Laba Rugi
+                                    </th>
+                                    <th colspan="2">
+                                        <i class="fas fa-balance-scale-right"></i> Posisi Keuangan<br>
+                                        <small>Neraca</small>
+                                    </th>
                                 </tr>
                                 <tr>
                                     <th>Debit</th>
@@ -12366,129 +12527,85 @@ def neraca_lajur():
                             <tbody>
                                 {rows_html if rows_html else """
                                 <tr>
-                                    <td colspan="11" style="text-align: center; padding: 50px; color: #ff6699;">
-                                        <h3 style="color: #ff3385; margin-bottom: 15px;">📊 Belum ada data neraca lajur</h3>
-                                        <p style="color: #ff6699; margin-bottom: 20px;">Mulai dengan input data berikut:</p>
-                                        <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center;">
-                                            <a href="/neraca-saldo-awal" class="btn" style="background: #ff66b2;">➕ Saldo Awal</a>
-                                            <a href="/jurnal-penyesuaian" class="btn" style="background: #ff3385;">🔄 Penyesuaian</a>
-                                            <a href="/jurnal-umum" class="btn" style="background: #ff6699;">📝 Jurnal</a>
+                                    <td colspan="11" style="text-align: center; padding: 50px;">
+                                        <h3 style="color: #ff1493; margin-bottom: 15px;">📊 Belum Ada Data</h3>
+                                        <p style="color: #666; margin-bottom: 25px;">Mulai dengan menambahkan data berikut:</p>
+                                        <div style="display: flex; gap: 15px; justify-content: center;">
+                                            <a href="/neraca-saldo-awal" class="btn">➕ Saldo Awal</a>
+                                            <a href="/jurnal-penyesuaian" class="btn">🔄 Penyesuaian</a>
+                                            <a href="/jurnal-umum" class="btn">📝 Jurnal Umum</a>
                                         </div>
                                     </td>
                                 </tr>
                                 """}
                             </tbody>
                             <tfoot>
-                                <tr style="background: linear-gradient(135deg, #fff5f9 0%, #ffe6f2 100%);">
-                                    <td><strong>📈 TOTAL</strong></td>
-                                    <td class="number"><strong>{rp(totals['neraca_debit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['neraca_kredit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['penyesuaian_debit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['penyesuaian_kredit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['nssp_debit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['nssp_kredit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['laba_rugi_debit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['laba_rugi_kredit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['posisi_keuangan_debit'])}</strong></td>
-                                    <td class="number"><strong>{rp(totals['posisi_keuangan_kredit'])}</strong></td>
-                                </tr>
-                                
-                                <tr style="background: linear-gradient(135deg, #f0fff4 0%, #e6ffe6 100%); border-left: 5px solid #00cc66;">
-                                    <td><strong>💰 LABA RUGI BERSIH</strong></td>
-                                    <td colspan="6"></td>
-                                    <td colspan="2" class="number {'laba' if laba_rugi_bersih >= 0 else 'rugi'}">
-                                        <strong>{rp(abs(laba_rugi_bersih))} {'(Laba)' if laba_rugi_bersih >= 0 else '(Rugi)'}</strong>
-                                    </td>
-                                    <td colspan="2"></td>
-                                </tr>
-                                
-                                <tr style="background: linear-gradient(135deg, #fff8e1 0%, #fff5e6 100%); border-left: 5px solid #ffcc00;">
-                                    <td><strong>⚖ FINAL BALANCE CHECK</strong></td>
-                                    <td colspan="8"></td>
-                                    <td colspan="2" class="number {'success' if is_final_balanced else 'danger'}">
-                                        {'✅ SEIMBANG' if is_final_balanced else '❌ TIDAK SEIMBANG'}
-                                    </td>
-                                </tr>
+                                {footer_html}
                             </tfoot>
                         </table>
                     </div>
                     
-                    <!-- Action Buttons -->
+                    <!-- ACTION BUTTONS -->
                     <div class="action-buttons">
-                        <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
-                        <a href="/neraca-saldo-awal" class="btn btn-warning">➕ Neraca Saldo Awal</a>
-                        <a href="/neraca-saldo-setelah-penyesuaian" class="btn btn-success">🔄 Lihat NSSP</a>
-                        <a href="/jurnal-penyesuaian" class="btn btn-info">📝 Penyesuaian</a>
-                        <button onclick="window.print()" class="btn" style="background: linear-gradient(135deg, #ff99cc 0%, #ff66b2 100%);">🖨 Cetak</button>
-                        <button onclick="location.reload()" class="btn" style="background: linear-gradient(135deg, #ff6699 0%, #ff3385 100%);">🔄 Refresh</button>
+                        <a href="/dashboard" class="btn">
+                            <i class="fas fa-home"></i> Dashboard
+                        </a>
+                        <a href="/neraca-saldo-awal" class="btn">
+                            <i class="fas fa-plus-circle"></i> Neraca Saldo Awal
+                        </a>
+                        <a href="/neraca-saldo-setelah-penyesuaian" class="btn">
+                            <i class="fas fa-redo"></i> Lihat NSSP
+                        </a>
+                        <a href="/jurnal-penyesuaian" class="btn">
+                            <i class="fas fa-cog"></i> Penyesuaian
+                        </a>
+                        <button onclick="window.print()" class="btn">
+                            <i class="fas fa-print"></i> Cetak
+                        </button>
+                        <button onclick="location.reload()" class="btn">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
                     </div>
                 </div>
             </div>
             
             <script>
                 document.addEventListener('DOMContentLoaded', function() {{
-                    // Highlight selisih dengan efek pink
-                    const nsspDebitCells = document.querySelectorAll('.worksheet-table tbody td:nth-child(6)');
-                    const nsspKreditCells = document.querySelectorAll('.worksheet-table tbody td:nth-child(7)');
-                    
-                    nsspDebitCells.forEach(cell => {{
+                    // Highlight NSSP cells
+                    const nsspCells = document.querySelectorAll('.nssp-debit-col, .nssp-kredit-col');
+                    nsspCells.forEach(cell => {{
                         if (cell.textContent.trim() !== '-' && cell.textContent.trim() !== 'Rp 0') {{
-                            cell.style.background = 'linear-gradient(90deg, rgba(255, 102, 178, 0.1) 0%, transparent 100%)';
-                            cell.style.borderRight = '2px solid #ff66b2';
+                            cell.style.boxShadow = 'inset 0 0 15px rgba(255, 105, 180, 0.2)';
+                            cell.style.borderRadius = '8px';
                         }}
                     }});
                     
-                    nsspKreditCells.forEach(cell => {{
-                        if (cell.textContent.trim() !== '-' && cell.textContent.trim() !== 'Rp 0') {{
-                            cell.style.background = 'linear-gradient(90deg, rgba(255, 51, 133, 0.1) 0%, transparent 100%)';
-                            cell.style.borderRight = '2px solid #ff3385';
-                        }}
-                    }});
-                    
-                    // Tambahkan efek hover untuk row
-                    const tableRows = document.querySelectorAll('.worksheet-table tbody tr');
-                    tableRows.forEach(row => {{
+                    // Hover effect for rows
+                    const rows = document.querySelectorAll('.worksheet-table tbody tr');
+                    rows.forEach(row => {{
                         row.addEventListener('mouseenter', function() {{
-                            const cells = this.querySelectorAll('td');
-                            cells.forEach(cell => {{
-                                cell.style.transition = 'background-color 0.3s ease';
-                            }});
+                            this.style.transform = 'scale(1.002)';
+                            this.style.boxShadow = '0 5px 15px rgba(255, 182, 193, 0.1)';
                         }});
                         
                         row.addEventListener('mouseleave', function() {{
-                            const cells = this.querySelectorAll('td');
-                            cells.forEach(cell => {{
-                                cell.style.transition = 'background-color 0.3s ease';
-                            }});
-                        }});
-                    }});
-                    
-                    // Tambahkan auto-scroll untuk kolom pertama (sticky)
-                    const akunNameCells = document.querySelectorAll('.akun-name');
-                    akunNameCells.forEach(cell => {{
-                        cell.addEventListener('mouseenter', function() {{
-                            this.style.boxShadow = '5px 0 15px rgba(255, 102, 178, 0.3)';
-                            this.style.zIndex = '10';
-                        }});
-                        
-                        cell.addEventListener('mouseleave', function() {{
+                            this.style.transform = 'scale(1)';
                             this.style.boxShadow = 'none';
-                            this.style.zIndex = '5';
                         }});
                     }});
                     
-                    // Alert untuk balance check
-                    const finalBalanceCheck = document.querySelector('.worksheet-table tfoot tr:last-child td.number');
-                    if (finalBalanceCheck.textContent.includes('SEIMBANG')) {{
-                        finalBalanceCheck.style.animation = 'pulse 2s infinite';
-                    }}
+                    // Pulse animation for unbalanced status
+                    const dangerCells = document.querySelectorAll('.danger');
+                    dangerCells.forEach(cell => {{
+                        cell.style.animation = 'pulse 2s infinite';
+                    }});
                     
-                    // Tambahkan animasi CSS
+                    // Add pulse animation
                     const style = document.createElement('style');
                     style.textContent = `
                         @keyframes pulse {{
                             0% {{ opacity: 1; }}
-                            50% {{ opacity: 0.7; }}
+                            50% {{ opacity: 0.5; }}
                             100% {{ opacity: 1; }}
                         }}
                     `;
@@ -12507,20 +12624,15 @@ def neraca_lajur():
         
         return f"""
         <html>
-        <body style="font-family: 'Segoe UI', Arial; padding: 20px; background: linear-gradient(135deg, #ffe6f2 0%, #ffccdd 100%);">
-            <div style="max-width: 600px; margin: 50px auto; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 15px 35px rgba(255, 105, 180, 0.2); border: 2px solid #ffb3d9;">
-                <h1 style="color: #ff3385; margin-bottom: 20px; text-align: center;">❌ Error Neraca Lajur</h1>
-                <p style="color: #666; margin-bottom: 15px;"><strong>Terjadi kesalahan:</strong></p>
-                <pre style="background: #ffe6f2; color: #ff3385; padding: 15px; border-radius: 10px; font-family: monospace; font-size: 12px; overflow: auto; border: 1px solid #ffccdd;">{str(e)}</pre>
-                <div style="text-align: center; margin-top: 25px;">
-                    <a href="/dashboard" style="display: inline-block; padding: 12px 25px; background: linear-gradient(135deg, #ff66b2 0%, #ff3385 100%); color: white; text-decoration: none; border-radius: 12px; margin: 5px; font-weight: 600; box-shadow: 0 4px 12px rgba(255, 102, 178, 0.3);">
-                        ← Dashboard
-                    </a>
-                    <a href="/neraca-saldo-setelah-penyesuaian" style="display: inline-block; padding: 12px 25px; background: linear-gradient(135deg, #ff6699 0%, #ff3385 100%); color: white; text-decoration: none; border-radius: 12px; margin: 5px; font-weight: 600; box-shadow: 0 4px 12px rgba(255, 102, 153, 0.3);">
-                        🔄 NSSP
-                    </a>
+        <body style="font-family: 'Segoe UI'; background: linear-gradient(135deg, #ffe6f2 0%, #ffccdd 100%); padding: 20px; height: 100vh; display: flex; justify-content: center; align-items: center;">
+            <div style="max-width: 600px; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 20px 40px rgba(255,105,180,0.2); text-align: center; border: 2px solid #ffb3d9;">
+                <h1 style="color: #ff1493; margin-bottom: 20px;"><i class="fas fa-exclamation-triangle"></i> Error Neraca Lajur</h1>
+                <pre style="background: #fff5f7; color: #ff1493; padding: 15px; border-radius: 10px; text-align: left; overflow: auto; font-size: 12px;">{str(e)}</pre>
+                <div style="margin-top: 25px;">
+                    <a href="/dashboard" style="display: inline-block; padding: 12px 25px; background: linear-gradient(135deg, #ff69b4 0%, #ff1493 100%); color: white; text-decoration: none; border-radius: 12px; margin: 5px; font-weight: 600;">← Dashboard</a>
                 </div>
             </div>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
         </body>
         </html>
         """
@@ -12857,7 +12969,7 @@ def process_prive_form(user_id, user_email):
                     {
                         "tanggal": tanggal,
                         "nama_akun": "Prive",
-                        "ref": "3120",
+                        "ref": "3210",
                         "debit": jumlah,
                         "kredit": 0,
                         "deskripsi": f"Prive: {keterangan}",
@@ -12869,8 +12981,8 @@ def process_prive_form(user_id, user_email):
                     # Kredit: Kas/Bank (Pengurangan Kas)
                     {
                         "tanggal": tanggal,
-                        "nama_akun": "Kas" if metode_pembayaran == "CASH" else "Bank",
-                        "ref": "1110" if metode_pembayaran == "CASH" else "1120",
+                        "nama_akun": "Kas",
+                        "ref": "1110",
                         "debit": 0,
                         "kredit": jumlah,
                         "deskripsi": f"Pembayaran prive: {keterangan}",
@@ -12941,8 +13053,8 @@ def process_tambahan_modal_form(user_id, user_email):
                     # Debit: Kas/Bank (Penambahan Kas)
                     {
                         "tanggal": tanggal,
-                        "nama_akun": "Kas" if sumber_modal == "CASH" else "Bank",
-                        "ref": "1110" if sumber_modal == "CASH" else "1120",
+                        "nama_akun": "Kas",
+                        "ref": "1110",
                         "debit": jumlah,
                         "kredit": 0,
                         "deskripsi": f"Tambahan modal: {keterangan}",
@@ -13663,8 +13775,8 @@ def process_modal_awal_form(user_id, user_email, sudah_ada_modal_awal):
                     # Debit: Kas/Bank (Penambahan Aset)
                     {
                         "tanggal": tanggal,
-                        "nama_akun": "Kas" if sumber_modal == "CASH" else "Bank",
-                        "ref": "1110" if sumber_modal == "CASH" else "1120",
+                        "nama_akun": "Kas",
+                        "ref": "1110",
                         "debit": jumlah,
                         "kredit": 0,
                         "deskripsi": f"Modal awal: {keterangan}",
@@ -15231,8 +15343,8 @@ def process_aset_tetap_form(user_email):
                     # Kredit: Kas/Bank
                     {
                         "tanggal": tanggal_perolehan,
-                        "nama_akun": "Kas" if metode_pembayaran == "CASH" else "Bank",
-                        "ref": "1110" if metode_pembayaran == "CASH" else "1120",
+                        "nama_akun": "Kas",
+                        "ref": "1110",
                         "debit": 0,
                         "kredit": nilai_perolehan,
                         "deskripsi": f"Pembayaran {jenis_aset.lower()}: {nama_aset}",
