@@ -1104,7 +1104,7 @@ AKUN_BEBAN_OPERASIONAL = "Beban Operasional"
 AKUN_BEBAN_PENYUSUTAN = "Beban Penyusutan"
 
 # ============================================================
-# 🎀 FUNGSI JURNAL UMUM PINKILANG - DISESUAIKAN DENGAN SQL
+# 🎀 FUNGSI JURNAL UMUM PINKILANG 
 # ============================================================
 
 def create_journal_entries(transaksi_type, data, user_email):
@@ -1656,12 +1656,12 @@ def create_journal_entries(transaksi_type, data, user_email):
         return False
 
 # ============================================================
-# 🎀 ROUTE: Generate Jurnal Otomatis - PINK THEME
+# 🎀 ROUTE: Generate Jurnal Otomatis 
 # ============================================================
 
 @app.route("/generate-jurnal-otomatis")
 def generate_jurnal_otomatis():
-    """Generate jurnal dari SEMUA transaksi - PINK THEME"""
+    """Generate jurnal dari SEMUA transaksi"""
     if not session.get('logged_in'):
         return redirect('/login')
     
@@ -6545,7 +6545,7 @@ def jurnal_penutup():
         """
 
 # ============================================================
-# 🔹 ROUTE: Neraca Saldo Setelah Penutupan
+# 🔹 ROUTE: Neraca Saldo Setelah Penutupan - DATA REAL PSAK
 # ============================================================
 @app.route("/neraca-saldo-setelah-penutupan")
 def neraca_saldo_setelah_penutupan():
@@ -6555,631 +6555,827 @@ def neraca_saldo_setelah_penutupan():
     user_email = session.get('user_email')
     current_period = datetime.now().strftime('%Y-%m')
     
+    # Inisialisasi variabel
+    neraca_lajur_data = []
+    modal_awal = 0
+    prive_total = 0
+    laba_rugi = 0
+    modal_akhir = 0
+    total_debit = 0
+    total_kredit = 0
+    
     try:
         # FORMAT CURRENCY HELPER
         def rp(val):
             try:
-                return f"Rp {int(val):,}".replace(",", ".")
+                if float(val) == 0:
+                    return "0"
+                return f"Rp {int(float(val)):,}".replace(",", ".")
             except:
-                return "Rp 0"
+                return "0"
 
-        # ============================================================
-        # 1. GENERATE & AMBIL DATA NERACA LAJUR
-        # ============================================================
-        generate_result = supabase.rpc(
-            'generate_neraca_lajur',
-            {'p_period': current_period, 'p_user_email': user_email}
-        ).execute()
-        
-        neraca_lajur_result = supabase.table("neraca_lajur")\
-            .select("*")\
-            .eq("period", current_period)\
-            .eq("user_email", user_email)\
-            .order("account_code")\
-            .execute()
-
-        neraca_lajur_data = neraca_lajur_result.data or []
-
-        # ============================================================
-        # 2. AMBIL DATA MODAL & PRIVE
-        # ============================================================
-        modal_awal_result = supabase.table("modal")\
-            .select("jumlah")\
-            .eq("user_email", user_email)\
-            .eq("tipe", "MODAL_AWAL")\
-            .execute()
-        modal_awal = sum(float(m.get('jumlah', 0) or 0) for m in modal_awal_result.data or [])
-        
-        tambahan_modal_result = supabase.table("modal")\
-            .select("jumlah")\
-            .eq("user_email", user_email)\
-            .eq("tipe", "TAMBAHAN_MODAL")\
-            .execute()
-        tambahan_modal = sum(float(m.get('jumlah', 0) or 0) for m in tambahan_modal_result.data or [])
-        
-        prive_result = supabase.table("prive")\
-            .select("jumlah")\
-            .eq("user_email", user_email)\
-            .execute()
-        total_prive = sum(float(p.get('jumlah', 0) or 0) for p in prive_result.data or [])
+        print(f"=== NERACA SALDO SETELAH PENUTUPAN - PSAK STANDARD ===")
         
         # ============================================================
-        # 3. HITUNG LABA BERSIH dari Neraca Lajur
+        # 1. GENERATE NERACA LAJUR DULU (JIKA BELUM ADA)
         # ============================================================
-        total_lr_debit = sum(float(item.get('laba_rugi_debit', 0) or 0) for item in neraca_lajur_data)
-        total_lr_kredit = sum(float(item.get('laba_rugi_kredit', 0) or 0) for item in neraca_lajur_data)
-        laba_bersih = total_lr_kredit - total_lr_debit
+        try:
+            # Panggil fungsi generate neraca lajur
+            generate_result = supabase.rpc(
+                'generate_neraca_lajur',
+                {'p_period': current_period, 'p_user_email': user_email}
+            ).execute()
+            print("✅ Neraca lajur digenerate")
+        except Exception as e:
+            print(f"⚠️ Generate neraca lajur: {e}")
         
-        # HITUNG MODAL AKHIR (setelah laba/rugi dan prive)
-        modal_akhir = modal_awal + tambahan_modal + laba_bersih - total_prive
-
         # ============================================================
-        # 4. AMBIL DATA ASET TETAP
+        # 2. AMBIL DATA DARI NERACA LAJUR
         # ============================================================
-        aset_tetap_result = supabase.table("aset_tetap")\
-            .select("*")\
-            .eq("user_email", user_email)\
-            .execute()
-        aset_tetap_data = aset_tetap_result.data or []
-
-        # ============================================================
-        # 5. AMBIL DATA PENDAPATAN DITERIMA DI MUKA (PDD)
-        # ============================================================
-        pdd_result = supabase.table("pendapatan_diterima_dimuka")\
-            .select("jumlah_dp")\
-            .eq("user_email", user_email)\
-            .eq("status", "dp_diterima")\
-            .execute()
-        total_pdd = sum(float(p.get('jumlah_dp', 0) or 0) for p in pdd_result.data or [])
-
-        # ============================================================
-        # 6. STRUKTUR AKUN LENGKAP 
-        # ============================================================
-        struktur_akun = {
-            # Aset Lancar
-            "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-            "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-            "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-            "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-
-            # Aset Tetap
-            "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
-            "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-            "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-            "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-            "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-            "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-
-            # Utang
-            "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
-            "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
+        try:
+            neraca_result = supabase.table("neraca_lajur")\
+                .select("*")\
+                .eq("user_email", user_email)\
+                .eq("period", current_period)\
+                .order("account_code")\
+                .execute()
             
-            # Modal
-            "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
-            "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
-            "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
-
-            # Pendapatan
-            "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
-
-            # HPP
-            "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "debit"},
-            "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
-
-            # Beban Operasional
-            "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
-            "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
-            "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
-            "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
+            neraca_lajur_data = neraca_result.data if neraca_result.data else []
+            print(f"✅ Data neraca lajur: {len(neraca_lajur_data)} records")
+            
+        except Exception as e:
+            print(f"❌ Error ambil neraca lajur: {e}")
+            neraca_lajur_data = []
+        
+        # ============================================================
+        # 3. AMBIL DATA MODAL AWAL DAN PRIVE
+        # ============================================================
+        try:
+            # Modal awal
+            modal_result = supabase.table("modal")\
+                .select("*")\
+                .eq("user_email", user_email)\
+                .eq("tipe", "MODAL_AWAL")\
+                .execute()
+            
+            if modal_result.data:
+                modal_awal = float(modal_result.data[0].get('jumlah', 0) or 0)
+        except Exception as e:
+            print(f"⚠️ Error ambil modal awal: {e}")
+            modal_awal = 0
+        
+        try:
+            # Prive
+            prive_result = supabase.table("prive")\
+                .select("jumlah")\
+                .eq("user_email", user_email)\
+                .execute()
+            
+            if prive_result.data:
+                prive_total = sum(float(p.get('jumlah', 0) or 0) for p in prive_result.data)
+        except Exception as e:
+            print(f"⚠️ Error ambil prive: {e}")
+            prive_total = 0
+        
+        # ============================================================
+        # 4. PROSES DATA NERACA LAJUR UNTUK NERACA SALDO SETELAH PENUTUPAN
+        # ============================================================
+        # Menurut PSAK, neraca saldo setelah penutupan hanya berisi akun riil
+        # Akun nominal (pendapatan, beban, prive, ikhtisar) sudah ditutup
+        
+        neraca_setelah_penutupan = []
+        
+        # Hitung total laba/rugi dari neraca lajur
+        total_pendapatan = 0
+        total_beban_hpp = 0
+        
+        for item in neraca_lajur_data:
+            kode = str(item.get('account_code', '')).strip()
+            neraca_debit = float(item.get('neraca_debit', 0) or 0)
+            neraca_kredit = float(item.get('neraca_kredit', 0) or 0)
+            
+            # Hitung pendapatan (akun 4xxx)
+            if kode.startswith('4'):
+                # Pendapatan normal balance kredit
+                saldo_pendapatan = neraca_kredit - neraca_debit
+                if saldo_pendapatan > 0:
+                    total_pendapatan += saldo_pendapatan
+            
+            # Hitung HPP dan beban (akun 5xxx, 6xxx)
+            elif kode.startswith('5') or kode.startswith('6'):
+                # Beban normal balance debit
+                saldo_beban = neraca_debit - neraca_kredit
+                if saldo_beban > 0:
+                    total_beban_hpp += saldo_beban
+        
+        # Hitung laba/rugi
+        laba_rugi = total_pendapatan - total_beban_hpp
+        modal_akhir = modal_awal + laba_rugi - prive_total
+        
+        print(f"💰 PERHITUNGAN MODAL PSAK:")
+        print(f"   Modal Awal: {rp(modal_awal)}")
+        print(f"   Total Pendapatan: {rp(total_pendapatan)}")
+        print(f"   Total Beban+HPP: {rp(total_beban_hpp)}")
+        print(f"   Laba/Rugi: {rp(laba_rugi)}")
+        print(f"   Prive: {rp(prive_total)}")
+        print(f"   Modal Akhir: {rp(modal_akhir)}")
+        
+        # ============================================================
+        # 5. BUAT NERACA SALDO SETELAH PENUTUPAN
+        # ============================================================
+        # Kelompokkan akun sesuai PSAK:
+        # 1. Aset (1xxx)
+        # 2. Kewajiban (2xxx)
+        # 3. Modal (3xxx)
+        # Akun nominal (4xxx, 5xxx, 6xxx, prive, ikhtisar) saldo = 0
+        
+        for item in neraca_lajur_data:
+            kode = str(item.get('account_code', '')).strip()
+            nama = str(item.get('account_name', '')).strip()
+            neraca_debit = float(item.get('neraca_debit', 0) or 0)
+            neraca_kredit = float(item.get('neraca_kredit', 0) or 0)
+            
+            if not kode or kode == 'None':
+                continue
+            
+            # Tentukan tipe akun berdasarkan kode PSAK
+            if kode.startswith('1'):
+                tipe = 'Aset Lancar' if kode.startswith('11') else 'Aset Tetap' if kode.startswith('12') else 'Aset'
+            elif kode.startswith('2'):
+                tipe = 'Utang'
+            elif kode == '3110':
+                tipe = 'Modal'
+            elif kode.startswith('4'):
+                tipe = 'Pendapatan'
+            elif kode.startswith('5'):
+                tipe = 'HPP'
+            elif kode.startswith('6'):
+                tipe = 'Beban'
+            elif kode == '3210':
+                tipe = 'Prive'
+            elif kode == '3310':
+                tipe = 'Ikhtisar'
+            else:
+                tipe = 'Lainnya'
+            
+            # Tentukan apakah akun ditutup (nominal) atau tidak (riil)
+            # Akun riil: Aset, Kewajiban, Modal
+            # Akun nominal: Pendapatan, Beban, HPP, Prive, Ikhtisar
+            ditutup = kode.startswith(('4', '5', '6')) or kode in ['3210', '3310']
+            
+            # Hitung saldo akhir berdasarkan normal balance
+            if kode.startswith(('1', '5', '6')):  # Aset, HPP, Beban (normal debit)
+                saldo_akhir = neraca_debit - neraca_kredit
+                saldo_debit = max(saldo_akhir, 0)
+                saldo_kredit = max(-saldo_akhir, 0)
+            else:  # Kewajiban, Modal, Pendapatan (normal kredit)
+                saldo_akhir = neraca_kredit - neraca_debit
+                saldo_debit = max(-saldo_akhir, 0)
+                saldo_kredit = max(saldo_akhir, 0)
+            
+            # Untuk neraca setelah penutupan:
+            # - Akun riil tetap ada saldonya
+            # - Akun nominal saldo = 0 (sudah ditutup)
+            # - Khusus akun Modal (3110), gunakan modal_akhir
+            
+            if ditutup:
+                debit_display = 0
+                kredit_display = 0
+            elif kode == '3110':  # Modal
+                debit_display = 0
+                kredit_display = max(modal_akhir, 0)
+            else:
+                debit_display = saldo_debit
+                kredit_display = saldo_kredit
+            
+            neraca_setelah_penutupan.append({
+                'kode': kode,
+                'nama': nama,
+                'tipe': tipe,
+                'debit': debit_display,
+                'kredit': kredit_display,
+                'ditutup': ditutup,
+                'saldo_akhir': saldo_akhir
+            })
+        
+        # Urutkan sesuai PSAK: Aset -> Kewajiban -> Modal -> Akun nominal
+        tipe_order = {
+            'Aset Lancar': 1, 'Aset Tetap': 2, 'Aset': 3,
+            'Utang': 4,
+            'Modal': 5,
+            'Pendapatan': 6, 'HPP': 7, 'Beban': 8, 
+            'Prive': 9, 'Ikhtisar': 10, 'Lainnya': 99
         }
-
-        # DEBUG: Tampilkan data neraca lajur yang didapat
-        print("=== DEBUG NERACA LAJUR DATA ===")
-        for item in neraca_lajur_data:
-            print(f"Code: {item.get('account_code')}, Name: {item.get('account_name')}, "
-                f"Neraca Debit: {item.get('neraca_debit')}, Neraca Kredit: {item.get('neraca_kredit')}")
-        print("=== END DEBUG ===")
-
+        
+        neraca_setelah_penutupan.sort(key=lambda x: (tipe_order.get(x['tipe'], 99), x['kode']))
+        
         # ============================================================
-        # 7. AMBIL DATA ASET LANCAR DARI TABEL YANG ADA 
+        # 6. HITUNG TOTAL DEBIT DAN KREDIT
         # ============================================================
-
-        print("=== MENCARI TABEL YANG ADA ===")
-
-        # CEK TABEL YANG ADA DENGAN QUERY SIMPLE
-        try:
-            # Coba cari tabel transaksi
-            test_result = supabase.table("jurnal_umum")\
-                .select("id")\
-                .limit(1)\
-                .execute()
-            print("✅ Tabel jurnal_umum ditemukan")
-        except Exception as e:
-            print(f"❌ Tabel jurnal_umum tidak ditemukan: {e}")
-
-        # A. KAS - Coba berbagai sumber
-        saldo_kas = 0
-        try:
-            # Coba dari jurnal umum - akun Kas (1110)
-            kas_result = supabase.table("jurnal_umum")\
-                .select("debit, kredit, account_code")\
-                .eq("user_email", user_email)\
-                .eq("account_code", "1110")\
-                .execute()
-            
-            for transaksi in kas_result.data:
-                saldo_kas += float(transaksi.get('debit', 0) or 0)
-                saldo_kas -= float(transaksi.get('kredit', 0) or 0)
-            
-            print(f"✅ Kas dari jurnal_umum: {saldo_kas}")
-        except Exception as e:
-            print(f"❌ Tidak bisa ambil Kas: {e}")
-        for item in neraca_lajur_data:
-            nama = str(item.get('account_name') or "").strip().lower()
-            if "kas" in nama:
-                saldo_kas = float(item.get('neraca_debit', 0) or 0)
-                break
-
-        struktur_akun['1110']['saldo_debit'] = max(saldo_kas, 0)
-
-        # B. PIUTANG USAHA - Coba dari jurnal umum
-        total_piutang = 0
-        try:
-            piutang_result = supabase.table("jurnal_umum")\
-                .select("debit, kredit, account_code")\
-                .eq("user_email", user_email)\
-                .eq("account_code", "1130")\
-                .execute()
-            
-            for transaksi in piutang_result.data:
-                total_piutang += float(transaksi.get('debit', 0) or 0)
-                total_piutang -= float(transaksi.get('kredit', 0) or 0)
-            
-            print(f"✅ Piutang dari jurnal_umum: {total_piutang}")
-        except Exception as e:
-            print(f"❌ Tidak bisa ambil Piutang: {e}")
-            # Fallback ke neraca lajur
-            for item in neraca_lajur_data:
-                if 'piutang' in str(item.get('account_name', '')).lower():
-                    total_piutang = float(item.get('neraca_debit', 0) or 0)
-                    break
-
-        struktur_akun['1120']['saldo_debit'] = max(total_piutang, 0)
-
-        # C. PERSEDIAAN - Coba dari jurnal umum
-        total_persediaan = 0
-        try:
-            persediaan_result = supabase.table("jurnal_umum")\
-                .select("debit, kredit, account_code")\
-                .eq("user_email", user_email)\
-                .eq("account_code", "1140")\
-                .execute()
-            
-            for transaksi in persediaan_result.data:
-                total_persediaan += float(transaksi.get('debit', 0) or 0)
-                total_persediaan -= float(transaksi.get('kredit', 0) or 0)
-            
-            print(f"✅ Persediaan dari jurnal_umum: {total_persediaan}")
-        except Exception as e:
-            print(f"❌ Tidak bisa ambil Persediaan: {e}")
-            # Fallback ke neraca lajur
-            for item in neraca_lajur_data:
-                if 'persediaan' in str(item.get('account_name', '')).lower():
-                    total_persediaan = float(item.get('neraca_debit', 0) or 0)
-                    break
-
-        struktur_akun['1130']['saldo_debit'] = max(total_persediaan, 0)
-
-        # D. PERLENGKAPAN - Coba dari jurnal umum
-        total_perlengkapan = 0
-        try:
-            perlengkapan_result = supabase.table("jurnal_umum")\
-                .select("debit, kredit, account_code")\
-                .eq("user_email", user_email)\
-                .eq("account_code", "1140")\
-                .execute()
-            
-            for transaksi in perlengkapan_result.data:
-                total_perlengkapan += float(transaksi.get('debit', 0) or 0)
-                total_perlengkapan -= float(transaksi.get('kredit', 0) or 0)
-            
-            print(f"✅ Perlengkapan dari jurnal_umum: {total_perlengkapan}")
-        except Exception as e:
-            print(f"❌ Tidak bisa ambil Perlengkapan: {e}")
-            # Fallback ke neraca lajur
-            for item in neraca_lajur_data:
-                if 'perlengkapan' in str(item.get('account_name', '')).lower() and 'beban' not in str(item.get('account_name', '')).lower():
-                    total_perlengkapan = float(item.get('neraca_debit', 0) or 0)
-                    break
-
-        struktur_akun['1140']['saldo_debit'] = max(total_perlengkapan, 0)
-
-        print(f"=== HASIL AKHIR ASET LANCAR ===")
-        print(f"Kas: {struktur_akun['1110']['saldo_debit']}")
-        print(f"Piutang: {struktur_akun['1120']['saldo_debit']}") 
-        print(f"Persediaan: {struktur_akun['1130']['saldo_debit']}")
-        print(f"Perlengkapan: {struktur_akun['1140']['saldo_debit']}")
+        total_debit = sum(akun['debit'] for akun in neraca_setelah_penutupan if not akun['ditutup'])
+        total_kredit = sum(akun['kredit'] for akun in neraca_setelah_penutupan if not akun['ditutup'])
+        
+        # Hitung total aset dan kewajiban untuk info
+        total_aset = sum(akun['debit'] for akun in neraca_setelah_penutupan 
+                        if akun['tipe'] in ['Aset Lancar', 'Aset Tetap', 'Aset'])
+        total_kewajiban = sum(akun['kredit'] for akun in neraca_setelah_penutupan 
+                            if akun['tipe'] == 'Utang')
+        
+        print(f"📊 TOTAL NERACA: Debit={total_debit}, Kredit={total_kredit}")
+        print(f"   Total Aset: {total_aset}")
+        print(f"   Total Kewajiban: {total_kewajiban}")
+        
         # ============================================================
-        # 8. UPDATE ASET TETAP & AKUMULASI PENYUSUTAN
-        # ============================================================
-        for aset in aset_tetap_data:
-            jenis = aset.get('jenis_aset', '').lower()
-            nama = aset.get('nama_aset', '').lower()
-            nilai = float(aset.get('nilai_perolehan', 0) or 0)
-            akumulasi = float(aset.get('akumulasi_penyusutan', 0) or 0)
-            
-            if 'tanah' in jenis or 'tanah' in nama:
-                struktur_akun['1261']['saldo_debit'] = nilai
-            elif 'bangunan' in jenis or 'bangunan' in nama:
-                struktur_akun['1263']['saldo_debit'] = nilai
-                struktur_akun['1260']['saldo_kredit'] = akumulasi
-            elif 'kendaraan' in jenis or 'kendaraan' in nama or 'mobil' in nama:
-                struktur_akun['1264']['saldo_debit'] = nilai
-                struktur_akun['1260']['saldo_kredit'] = akumulasi
-            elif 'peralatan' in jenis or 'peralatan' in nama or 'mesin' in nama:
-                struktur_akun['1265']['saldo_debit'] = nilai
-                struktur_akun['1260']['saldo_kredit'] = akumulasi
-
-        # ============================================================
-        # 9. HITUNG TOTAL DEBIT & KREDIT
-        # ============================================================
-        total_debit = sum(
-            data.get('saldo_debit', 0) 
-            for data in struktur_akun.values() 
-            if data.get('type') == 'detail'
-        )
-        total_kredit = sum(
-            data.get('saldo_kredit', 0) 
-            for data in struktur_akun.values() 
-            if data.get('type') == 'detail'
-        )
-
-        # ============================================================
-        # 10. GENERATE HTML ROWS
+        # 7. GENERATE HTML ROWS
         # ============================================================
         rows_html = ""
-        for kode in sorted(struktur_akun.keys()):
-            data = struktur_akun[kode]
+        current_tipe = ""
+        
+        for akun in neraca_setelah_penutupan:
+            # Header untuk tipe baru
+            if akun['tipe'] != current_tipe:
+                current_tipe = akun['tipe']
+                
+                if current_tipe in ['Aset Lancar', 'Aset Tetap', 'Aset']:
+                    # Cek apakah header ASET sudah ditampilkan
+                    if not any('ASET' in row for row in rows_html.split('\n')):
+                        rows_html += '''
+                        <tr class="header-row">
+                            <td colspan="2"><strong>ASET</strong></td>
+                            <td class="number"></td>
+                            <td class="number"></td>
+                        </tr>
+                        '''
+                elif current_tipe == 'Utang':
+                    rows_html += '''
+                    <tr class="header-row">
+                        <td colspan="2"><strong>KEWAJIBAN</strong></td>
+                        <td class="number"></td>
+                        <td class="number"></td>
+                    </tr>
+                    '''
+                elif current_tipe == 'Modal':
+                    rows_html += '''
+                    <tr class="header-row">
+                        <td colspan="2"><strong>MODAL</strong></td>
+                        <td class="number"></td>
+                        <td class="number"></td>
+                    </tr>
+                    '''
+                elif current_tipe in ['Pendapatan', 'HPP', 'Beban', 'Prive', 'Ikhtisar']:
+                    rows_html += '''
+                    <tr class="header-row">
+                        <td colspan="2"><strong>AKUN NOMINAL YANG DITUTUP</strong></td>
+                        <td class="number"></td>
+                        <td class="number"></td>
+                    </tr>
+                    '''
+                    current_tipe = 'AKUN_NOMINAL'
             
-            if data.get('type', 'header') == 'header':
-                rows_html += f"""
-                <tr class="header-row">
-                    <td><strong>{kode}</strong></td>
-                    <td><strong>{data['nama']}</strong></td>
-                    <td class="number"></td>
-                    <td class="number"></td>
-                </tr>
-                """
+            # CSS class berdasarkan tipe
+            if akun['ditutup']:
+                css_class = "closed-account"
+                if akun['tipe'] == 'Pendapatan':
+                    css_class += " income"
+                elif akun['tipe'] in ['HPP', 'Beban']:
+                    css_class += " expense"
+                elif akun['tipe'] == 'Prive':
+                    css_class += " prive"
+                elif akun['tipe'] == 'Ikhtisar':
+                    css_class += " ikhtisar"
             else:
-                debit = data.get('saldo_debit', 0)
-                kredit = data.get('saldo_kredit', 0)
-                
-                debit_display = rp(debit) if debit > 0 else ""
-                kredit_display = rp(kredit) if kredit > 0 else ""
-                
-                # Tandai akun yang sudah ditutup (saldo = 0)
-                row_class = "closed-account" if debit == 0 and kredit == 0 else ""
-                
-                rows_html += f"""
-                <tr class="{row_class}">
-                    <td>{kode}</td>
-                    <td class="detail">{data['nama']}</td>
-                    <td class="number">{debit_display}</td>
-                    <td class="number">{kredit_display}</td>
-                </tr>
-                """
+                css_class = akun['tipe'].lower().replace(' ', '-')
+            
+            # Format saldo untuk display
+            if akun['ditutup']:
+                debit_display = "0"
+                kredit_display = "0"
+            else:
+                debit_display = rp(akun['debit']) if akun['debit'] > 0 else ""
+                kredit_display = rp(akun['kredit']) if akun['kredit'] > 0 else ""
+            
+            rows_html += f'''
+            <tr class="{css_class}">
+                <td>{akun['kode']}</td>
+                <td class="detail">{akun['nama']}</td>
+                <td class="number">{debit_display}</td>
+                <td class="number">{kredit_display}</td>
+            </tr>
+            '''
+        
+        # Tambahkan baris total
+        rows_html += f'''
+        <tr class="total-row">
+            <td colspan="2"><strong>TOTAL</strong></td>
+            <td class="number"><strong>{rp(total_debit)}</strong></td>
+            <td class="number"><strong>{rp(total_kredit)}</strong></td>
+        </tr>
+        '''
         
         # ============================================================
-        # 11. SUMMARY INFO
+        # 8. GENERATE HTML FULL PAGE
         # ============================================================
-        balance_status = "✅ SEIMBANG" if abs(total_debit - total_kredit) < 0.01 else "❌ TIDAK SEIMBANG"
-        balance_class = "balance-correct" if abs(total_debit - total_kredit) < 0.01 else "balance-incorrect"
+        seimbang = abs(total_debit - total_kredit) < 0.01
+        balance_status = "✅ SEIMBANG" if seimbang else "❌ TIDAK SEIMBANG"
+        bulan_indonesia = {
+            '01': 'Januari', '02': 'Februari', '03': 'Maret', '04': 'April',
+            '05': 'Mei', '06': 'Juni', '07': 'Juli', '08': 'Agustus',
+            '09': 'September', '10': 'Oktober', '11': 'November', '12': 'Desember'
+        }
         
-        summary_html = f"""
-        <div class="summary-info">
-            <div class="summary-item">
-                <div class="summary-value">{rp(total_debit)}</div>
-                <div class="summary-label">Total Debit</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{rp(total_kredit)}</div>
-                <div class="summary-label">Total Kredit</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{rp(modal_akhir)}</div>
-                <div class="summary-label">Modal Akhir</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{rp(laba_bersih)}</div>
-                <div class="summary-label">Laba Bersih</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{rp(total_pdd)}</div>
-                <div class="summary-label">Pendapatan DDM</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{balance_status}</div>
-                <div class="summary-label">Status Neraca</div>
+        tahun = current_period.split('-')[0]
+        bulan = current_period.split('-')[1]
+        periode_display = f"{bulan_indonesia.get(bulan, '')} {tahun}"
+        
+        html = f'''
+        <!DOCTYPE html>
+<html>
+<head>
+    <title>Neraca Saldo Setelah Penutupan - PSAK</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #fce4ec, #f8bbd9);
+            padding: 20px;
+            min-height: 100vh;
+        }}
+        
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(255,105,180,0.2);
+            overflow: hidden;
+        }}
+        
+        .header {{
+            background: linear-gradient(135deg, #ec407a, #f06292);
+            color: white;
+            padding: 25px;
+            text-align: center;
+        }}
+        
+        .back-btn {{
+            display: inline-block;
+            padding: 10px 20px;
+            background: rgba(255,255,255,0.2);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border: 1px solid rgba(255,255,255,0.3);
+            transition: all 0.3s ease;
+        }}
+        
+        .back-btn:hover {{
+            background: rgba(255,255,255,0.3);
+            transform: translateY(-2px);
+        }}
+        
+        h1 {{
+            font-size: 28px;
+            margin-bottom: 10px;
+        }}
+        
+        .content {{
+            padding: 30px;
+        }}
+        
+        .post-closing-tb {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 14px;
+        }}
+        
+        .post-closing-tb th {{
+            background: #fce4ec;
+            padding: 12px 8px;
+            text-align: left;
+            border: 1px solid #f8bbd9;
+            font-weight: 600;
+            color: #c2185b;
+        }}
+        
+        .post-closing-tb td {{
+            padding: 10px 8px;
+            border: 1px solid #f8bbd9;
+        }}
+        
+        .post-closing-tb .header-row {{
+            background: #f8bbd9;
+            font-weight: bold;
+            color: #880e4f;
+        }}
+        
+        .post-closing-tb .detail {{
+            padding-left: 20px;
+        }}
+        
+        .aset-lancar, .aset-tetap, .aset {{
+            background: linear-gradient(90deg, rgba(236, 64, 122, 0.1) 0%, transparent 100%);
+        }}
+        
+        .utang {{
+            background: linear-gradient(90deg, rgba(194, 24, 91, 0.1) 0%, transparent 100%);
+        }}
+        
+        .modal {{
+            background: linear-gradient(90deg, rgba(136, 14, 79, 0.1) 0%, transparent 100%);
+        }}
+        
+        .aset-lancar td:first-child, .aset-tetap td:first-child, .aset td:first-child {{
+            border-left: 4px solid #ec407a;
+        }}
+        
+        .utang td:first-child {{
+            border-left: 4px solid #c2185b;
+        }}
+        
+        .modal td:first-child {{
+            border-left: 4px solid #880e4f;
+        }}
+        
+        .closed-account {{
+            background: #f5f5f5;
+            color: #999;
+            font-style: italic;
+        }}
+        
+        .closed-account td:first-child {{
+            border-left: 4px solid #bdbdbd;
+        }}
+        
+        .closed-account.income {{
+            background: #e8f5e9;
+            color: #666;
+        }}
+        
+        .closed-account.income td:first-child {{
+            border-left: 4px solid #4caf50;
+        }}
+        
+        .closed-account.expense {{
+            background: #ffebee;
+            color: #666;
+        }}
+        
+        .closed-account.expense td:first-child {{
+            border-left: 4px solid #f44336;
+        }}
+        
+        .closed-account.prive {{
+            background: #f3e5f5;
+            color: #666;
+        }}
+        
+        .closed-account.prive td:first-child {{
+            border-left: 4px solid #9c27b0;
+        }}
+        
+        .closed-account.ikhtisar {{
+            background: #fff3e0;
+            color: #666;
+        }}
+        
+        .closed-account.ikhtisar td:first-child {{
+            border-left: 4px solid #ff9800;
+        }}
+        
+        .post-closing-tb .total-row {{
+            background: #fce4ec;
+            font-weight: bold;
+            border-top: 2px solid #f06292;
+        }}
+        
+        .number {{
+            text-align: right;
+            font-family: 'Courier New', monospace;
+            white-space: nowrap;
+        }}
+        
+        .summary-info {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }}
+        
+        .summary-item {{
+            background: #fce4ec;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            border-left: 4px solid #ec407a;
+        }}
+        
+        .summary-value {{
+            font-size: 16px;
+            font-weight: bold;
+            color: #c2185b;
+            margin-bottom: 5px;
+        }}
+        
+        .summary-label {{
+            font-size: 12px;
+            color: #880e4f;
+        }}
+        
+        .balance-status {{
+            text-align: center;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 10px;
+            background: {'#c8e6c9' if seimbang else '#ffcdd2'};
+            color: {'#2e7d32' if seimbang else '#c62828'};
+            border: 2px solid {'#a5d6a7' if seimbang else '#ef9a9a'};
+        }}
+        
+        .balance-main {{
+            font-size: 18px;
+            font-weight: 600;
+        }}
+        
+        .balance-detail {{
+            font-size: 14px;
+            margin-top: 5px;
+        }}
+        
+        .action-buttons {{
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #f8bbd9;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }}
+        
+        .btn {{
+            padding: 12px 24px;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            border: none;
+            cursor: pointer;
+        }}
+        
+        .btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(236, 64, 122, 0.3);
+        }}
+        
+        .btn-primary {{ background: linear-gradient(135deg, #ec407a, #f06292); }}
+        .btn-info {{ background: linear-gradient(135deg, #ab47bc, #ba68c8); }}
+        .btn-success {{ background: linear-gradient(135deg, #66bb6a, #81c784); }}
+        .btn-warning {{ background: linear-gradient(135deg, #ffb74d, #ffcc80); color: #000; }}
+        .btn-gray {{ background: linear-gradient(135deg, #757575, #9e9e9e); }}
+        
+        .info-box {{
+            background: #fce4ec;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #880e4f;
+            border-left: 4px solid #ec407a;
+        }}
+        
+        .no-data {{
+            text-align: center;
+            padding: 50px;
+            color: #ec407a;
+        }}
+        
+        .psak-badge {{
+            display: inline-block;
+            background: #880e4f;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 10px;
+        }}
+        
+        @media print {{
+            .back-btn, .action-buttons {{
+                display: none !important;
+            }}
+            body {{
+                background: white !important;
+            }}
+            .container {{
+                box-shadow: none !important;
+                border: 1px solid #ddd !important;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="/dashboard" class="back-btn">← Kembali ke Dashboard</a>
+            <h1>📋 NERACA SALDO SETELAH PENUTUPAN <span class="psak-badge">PSAK</span></h1>
+            <div>RUMAH BIBIT MAS ANGGA</div>
+            <div style="font-size: 14px; opacity: 0.9;">Periode: {periode_display}</div>
+            <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">
+                {len(neraca_setelah_penutupan)} akun | Data dari Neraca Lajur
             </div>
         </div>
-        """
         
-        # ============================================================
-        # 12. GENERATE FULL HTML
-        # ============================================================
-        html = f"""
-        <!DOCTYPE html>
+        <div class="content">
+            <div class="summary-info">
+                <div class="summary-item">
+                    <div class="summary-value">{rp(total_debit)}</div>
+                    <div class="summary-label">Total Debit</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{rp(total_kredit)}</div>
+                    <div class="summary-label">Total Kredit</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{rp(modal_akhir)}</div>
+                    <div class="summary-label">Modal Akhir</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{len([a for a in neraca_setelah_penutupan if not a['ditutup']])}</div>
+                    <div class="summary-label">Akun Riil</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{len([a for a in neraca_setelah_penutupan if a['ditutup']])}</div>
+                    <div class="summary-label">Akun Ditutup</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{len(neraca_lajur_data)}</div>
+                    <div class="summary-label">Data Neraca Lajur</div>
+                </div>
+            </div>
+            
+            <div class="balance-status">
+                <div class="balance-main">{balance_status}</div>
+                <div class="balance-detail">
+                    Total Debit: {rp(total_debit)} | Total Kredit: {rp(total_kredit)}
+                    {f" | Selisih: {rp(abs(total_debit - total_kredit))}" if not seimbang else ""}
+                </div>
+            </div>
+            
+            <table class="post-closing-tb">
+                <thead>
+                    <tr>
+                        <th width="80">KODE</th>
+                        <th>NAMA AKUN</th>
+                        <th width="180">DEBIT</th>
+                        <th width="180">KREDIT</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html if neraca_lajur_data else '''
+                    <tr>
+                        <td colspan="4" class="no-data">
+                            <h3>📊 Data Neraca Lajur Kosong</h3>
+                            <p>Belum ada data neraca lajur untuk periode ini.</p>
+                            <p>Silakan input transaksi terlebih dahulu atau generate neraca lajur.</p>
+                            <div style="margin-top: 20px;">
+                                <a href="/jurnal-umum" class="btn btn-primary" style="padding: 8px 16px;">📝 Input Jurnal</a>
+                                <a href="/neraca-lajur" class="btn btn-success" style="padding: 8px 16px;">📊 Generate Neraca Lajur</a>
+                            </div>
+                        </td>
+                    </tr>
+                    '''}
+                </tbody>
+            </table>
+            
+            <div class="info-box">
+                <strong>📝 KETERANGAN BERDASARKAN PSAK:</strong><br>
+                • <span style="background: #f5f5f5; padding: 2px 5px; border-radius: 3px; border-left: 3px solid #bdbdbd;">Akun abu-abu</span> adalah akun nominal yang sudah ditutup ke Modal<br>
+                • Neraca setelah penutupan hanya berisi <strong>akun riil</strong> (Aset, Kewajiban, Modal)<br>
+                • <strong>Modal Akhir = Modal Awal ({rp(modal_awal)}) + Laba/Rugi ({rp(laba_rugi)}) - Prive ({rp(prive_total)})</strong><br>
+                • Laba/Rugi = Pendapatan ({rp(total_pendapatan)}) - Beban+HPP ({rp(total_beban_hpp)})<br>
+                • Data diambil dari tabel: <strong>neraca_lajur</strong> periode {current_period}<br>
+                • Standar: PSAK (Pernyataan Standar Akuntansi Keuangan)
+            </div>
+            
+            <div class="action-buttons">
+                <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
+                <a href="/neraca-lajur" class="btn btn-info">📊 Neraca Lajur</a>
+                <a href="/laporan-posisi-keuangan" class="btn btn-success">💰 Laporan Posisi Keuangan</a>
+                <a href="/laporan-perubahan-modal" class="btn btn-warning">📈 Laporan Perubahan Modal</a>
+                <button onclick="window.print()" class="btn btn-gray">🖨️ Cetak Laporan</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        console.log("=== DEBUG INFO PSAK ===");
+        console.log("Data neraca lajur:", {len(neraca_lajur_data)});
+        console.log("Modal akhir:", {modal_akhir});
+        console.log("Total debit:", {total_debit});
+        console.log("Total kredit:", {total_kredit});
+        
+        // Tambahkan efek hover
+        document.querySelectorAll('.post-closing-tb tbody tr:not(.header-row):not(.total-row)').forEach(row => {{
+            row.addEventListener('mouseenter', function() {{
+                if (!this.classList.contains('closed-account')) {{
+                    this.style.transform = 'translateX(5px)';
+                    this.style.boxShadow = '2px 2px 10px rgba(0,0,0,0.1)';
+                }}
+            }});
+            
+            row.addEventListener('mouseleave', function() {{
+                this.style.transform = '';
+                this.style.boxShadow = '';
+            }});
+        }});
+        
+        // Alert jika tidak seimbang
+        if ({not seimbang}) {{
+            setTimeout(() => {{
+                alert('⚠️ PERHATIAN: Neraca Saldo Tidak Seimbang!\\nSelisih: ' + 
+                      {abs(total_debit - total_kredit)}.toLocaleString('id-ID', {{style: 'currency', currency: 'IDR'}}));
+            }}, 1000);
+        }}
+    </script>
+</body>
+</html>
+        '''
+        return html
+        
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"❌ Error Neraca Saldo Setelah Penutupan: {str(e)}")
+        print(f"Traceback: {error_details}")
+        
+        return f'''
         <html>
         <head>
-            <title>Neraca Saldo Setelah Penutupan - PINKILANG</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                * {{
-                    margin: 0;
-                    padding: 0;
-                    box-sizing: border-box;
-                }}
-                
                 body {{
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    background: linear-gradient(135deg, #f0f8ff, #e6f7ff);
+                    font-family: Arial;
+                    background: #fce4ec;
                     padding: 20px;
-                    min-height: 100vh;
                 }}
-                
-                .container {{
-                    max-width: 900px;
-                    margin: 0 auto;
+                .error-box {{
+                    max-width: 600px;
+                    margin: 50px auto;
                     background: white;
-                    border-radius: 15px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-                    overflow: hidden;
-                }}
-                
-                .header {{
-                    background: linear-gradient(135deg, #28a745, #20c997);
-                    color: white;
-                    padding: 25px;
+                    padding: 30px;
+                    border-radius: 10px;
+                    box-shadow: 0 5px 15px rgba(236,64,122,0.2);
                     text-align: center;
+                    border: 2px solid #f06292;
                 }}
-                
-                .back-btn {{
+                h1 {{ color: #ec407a; }}
+                .error-details {{
+                    background: #fce4ec;
+                    color: #c2185b;
+                    padding: 15px;
+                    border-radius: 5px;
+                    font-family: monospace;
+                    font-size: 12px;
+                    text-align: left;
+                    margin: 20px 0;
+                    max-height: 200px;
+                    overflow-y: auto;
+                }}
+                .btn {{
                     display: inline-block;
                     padding: 10px 20px;
-                    background: rgba(255,255,255,0.2);
+                    background: linear-gradient(135deg, #ec407a, #f06292);
                     color: white;
                     text-decoration: none;
-                    border-radius: 8px;
-                    margin-bottom: 15px;
-                    border: 1px solid rgba(255,255,255,0.3);
-                    transition: all 0.3s ease;
-                }}
-                
-                .back-btn:hover {{
-                    background: rgba(255,255,255,0.3);
-                    transform: translateY(-2px);
-                }}
-                
-                h1 {{
-                    font-size: 28px;
-                    margin-bottom: 10px;
-                }}
-                
-                .content {{
-                    padding: 30px;
-                }}
-                
-                .post-closing-tb {{
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin: 20px 0;
-                    font-size: 14px;
-                }}
-                
-                .post-closing-tb th {{
-                    background: #f8f9fa;
-                    padding: 12px 8px;
-                    text-align: left;
-                    border: 1px solid #dee2e6;
-                    font-weight: 600;
-                }}
-                
-                .post-closing-tb td {{
-                    padding: 10px 8px;
-                    border: 1px solid #dee2e6;
-                }}
-                
-                .post-closing-tb .header-row {{
-                    background: #e3f2fd;
-                    font-weight: bold;
-                }}
-                
-                .post-closing-tb .detail {{
-                    padding-left: 20px;
-                }}
-                
-                .post-closing-tb .closed-account {{
-                    background: #f8f9fa;
-                    color: #999;
-                    font-style: italic;
-                }}
-                
-                .post-closing-tb .total-row {{
-                    background: #fff3cd;
-                    font-weight: bold;
-                }}
-                
-                .number {{
-                    text-align: right;
-                    font-family: 'Courier New', monospace;
-                }}
-                
-                .balance-status {{
-                    text-align: center;
-                    padding: 15px;
-                    margin: 20px 0;
-                    border-radius: 10px;
-                    font-weight: 600;
-                }}
-                
-                .balance-correct {{
-                    background: #d4edda;
-                    color: #155724;
-                    border: 2px solid #c3e6cb;
-                }}
-                
-                .balance-incorrect {{
-                    background: #f8d7da;
-                    color: #721c24;
-                    border: 2px solid #f5c6cb;
-                }}
-                
-                .summary-info {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                    gap: 15px;
-                    margin: 20px 0;
-                }}
-                
-                .summary-item {{
-                    background: #f8f9fa;
-                    padding: 15px;
-                    border-radius: 8px;
-                    text-align: center;
-                    border-left: 4px solid #28a745;
-                }}
-                
-                .summary-value {{
-                    font-size: 16px;
-                    font-weight: bold;
-                    color: #28a745;
-                    margin-bottom: 5px;
-                }}
-                
-                .summary-label {{
-                    font-size: 12px;
-                    color: #666;
-                }}
-                
-                .action-buttons {{
-                    text-align: center;
-                    margin-top: 30px;
-                    padding-top: 20px;
-                    border-top: 1px solid #eee;
-                    display: flex;
-                    gap: 10px;
-                    justify-content: center;
-                    flex-wrap: wrap;
-                }}
-                
-                .btn {{
-                    padding: 12px 24px;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 6px;
-                    transition: all 0.3s ease;
-                    font-weight: 500;
-                }}
-                
-                .btn:hover {{
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                }}
-                
-                .btn-primary {{ background: #28a745; }}
-                .btn-info {{ background: #17a2b8; }}
-                .btn-success {{ background: #20c997; }}
-                .btn-warning {{ background: #ffc107; color: #000; }}
-                
-                @media print {{
-                    body {{ background: white; padding: 0; }}
-                    .container {{ box-shadow: none; }}
-                    .action-buttons {{ display: none; }}
-                    .summary-info {{ display: none; }}
-                    .closed-account {{ display: none; }}
+                    border-radius: 5px;
+                    margin: 10px;
                 }}
             </style>
         </head>
         <body>
-            <div class="container">
-                <div class="header">
-                    <a href="/dashboard" class="back-btn">← Kembali ke Dashboard</a>
-                    <h1>📋 NERACA SALDO SETELAH PENUTUPAN</h1>
-                    <div>RUMAH BIBIT MAS ANGGA</div>
-                    <div style="font-size: 14px; opacity: 0.9;">Periode: {datetime.now().strftime('%B %Y')}</div>
+            <div class="error-box">
+                <h1>❌ Error</h1>
+                <p style="color: #880e4f; margin: 20px 0;">Terjadi kesalahan dalam menampilkan Neraca Saldo Setelah Penutupan:</p>
+                <div class="error-details">
+                    {str(e)[:500]}
                 </div>
-                
-                <div class="content">
-                    {summary_html}
-                    
-                    <div class="balance-status {balance_class}">
-                        {balance_status}
-                        <br>
-                        <small>Total Debit: {rp(total_debit)} | Total Kredit: {rp(total_kredit)}</small>
-                    </div>
-                    
-                    <table class="post-closing-tb">
-                        <thead>
-                            <tr>
-                                <th width="80">NO</th>
-                                <th>NAMA AKUN</th>
-                                <th width="180">DEBIT</th>
-                                <th width="180">KREDIT</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {rows_html}
-                            <tr class="total-row">
-                                <td colspan="2"><strong>TOTAL</strong></td>
-                                <td class="number"><strong>{rp(total_debit)}</strong></td>
-                                <td class="number"><strong>{rp(total_kredit)}</strong></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    
-                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 20px; font-size: 12px; color: #666;">
-                        <strong>📝 Keterangan:</strong><br>
-                        • Akun berwarna abu-abu adalah akun nominal yang sudah ditutup (Pendapatan, Beban, Prive, Ikhtisar L/R)<br>
-                        • Modal Akhir = Modal Awal + Tambahan Modal + Laba Bersih - Prive<br>
-                        • Hanya akun riil (Aset, Utang, Modal) yang memiliki saldo<br>
-                        • Pendapatan DDM diambil dari transaksi DP yang belum lunas<br>
-                        • Data diambil dari Neraca Lajur periode {current_period}
-                    </div>
-                    
-                    <div class="action-buttons">
-                        <a href="/dashboard" class="btn btn-primary">🏠 Dashboard</a>
-                        <a href="/neraca-lajur" class="btn btn-info">📊 Neraca Lajur</a>
-                        <a href="/jurnal-penutup" class="btn btn-success">📒 Jurnal Penutup</a>
-                        <a href="/laporan-perubahan-modal" class="btn btn-warning">💰 Perubahan Modal</a>
-                        <button onclick="window.print()" class="btn" style="background: #6c757d;">🖨️ Cetak</button>
-                    </div>
+                <div>
+                    <a href="/dashboard" class="btn">← Kembali ke Dashboard</a>
+                    <a href="/neraca-lajur" class="btn">📊 Ke Neraca Lajur</a>
                 </div>
             </div>
         </body>
         </html>
-        """
-        return html
-        
-    except Exception as e:
-        logger.error(f"❌ Error Neraca Saldo Setelah Penutupan: {str(e)}")
-        import traceback
-        error_details = traceback.format_exc()
-        
-        return f"""
-        <html>
-        <body style="font-family: Arial; padding: 20px; background: #f8f9fa;">
-            <div style="max-width: 600px; margin: 50px auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); text-align: center;">
-                <h1 style="color: #dc3545;">❌ Error</h1>
-                <p style="color: #666; margin: 20px 0;">Terjadi kesalahan:</p>
-                <p style="background: #f8d7da; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left; overflow-x: auto;">
-                    {str(e)}<br><br>{error_details}
-                </p>
-                <a href="/dashboard" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">← Kembali</a>
-            </div>
-        </body>
-        </html>
-        """
+        '''
     
 # ============================================================
 # 🔹 ROUTE: Operasional (PENGELUARAN BIAYA OPERASIONAL) 
@@ -11769,7 +11965,7 @@ def get_initial_balance_data():
         return {}
 
 # ============================================================
-# 🔹 ROUTE: Neraca Lajur (Worksheet) - SESUAI CHART_OF_ACCOUNTS
+# 🔹 ROUTE: Neraca Lajur (Worksheet)
 # ============================================================
 @app.route("/neraca-lajur")
 def neraca_lajur():
@@ -11806,53 +12002,75 @@ def neraca_lajur():
             """Normalisasi nama akun sesuai CHART_OF_ACCOUNTS"""
             nama_lower = akun_nama.lower().strip()
             
-            # Mapping langsung berdasarkan nama
+            # Mapping langsung berdasarkan nama akun ke kode
             akun_mapping = {
                 # Aset Lancar
-                "1110": {"nama": "Kas", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-                "1120": {"nama": "Piutang Usaha", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-                "1130": {"nama": "Persediaan Barang Dagang", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-                "1140": {"nama": "Perlengkapan", "tipe": "Aset Lancar", "saldo_normal": "debit"},
-
+                "kas": "1110",
+                "piutang usaha": "1120",
+                "piutang": "1120",
+                "persediaan barang dagang": "1130",
+                "persediaan": "1130",
+                "perlengkapan": "1140",
+                
                 # Aset Tetap
-                "1260": {"nama": "Akumulasi Penyusutan", "tipe": "Aset Tetap", "saldo_normal": "kredit"},
-                "1261": {"nama": "Tanah", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-                "1262": {"nama": "Bangunan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-                "1263": {"nama": "Kendaraan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-                "1264": {"nama": "Peralatan", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-                "1265": {"nama": "Inventaris", "tipe": "Aset Tetap", "saldo_normal": "debit"},
-
+                "akumulasi penyusutan": "1260",
+                "akumulasi": "1260",
+                "tanah": "1261",
+                "bangunan": "1262",
+                "kendaraan": "1263",
+                "peralatan": "1264",
+                "inventaris": "1265",
+                
                 # Utang
-                "2110": {"nama": "Utang Usaha", "tipe": "Utang", "saldo_normal": "kredit"},
-                "2120": {"nama": "Pendapatan Diterima Di Muka", "tipe": "Utang", "saldo_normal": "kredit"},
+                "utang usaha": "2110",
+                "utang": "2110",
+                "pendapatan diterima di muka": "2120",
+                "pendapatan dimuka": "2120",
+                "diterima dimuka": "2120",
                 
                 # Modal
-                "3110": {"nama": "Modal Pemilik", "tipe": "Modal", "saldo_normal": "kredit"},
-                "3210": {"nama": "Prive", "tipe": "Modal", "saldo_normal": "debit"},
-                "3310": {"nama": "Ikhtisar Laba Rugi", "tipe": "Modal", "saldo_normal": "debit"},
-
+                "modal pemilik": "3110",
+                "modal": "3110",
+                "prive": "3210",
+                "ikhtisar laba rugi": "3310",
+                "ikhtisar": "3310",
+                
                 # Pendapatan
-                "4110": {"nama": "Penjualan", "tipe": "Pendapatan", "saldo_normal": "kredit"},
-
+                "penjualan": "4110",
+                "pendapatan": "4110",
+                
                 # HPP
-                "5110": {"nama": "Pembelian", "tipe": "HPP", "saldo_normal": "kredit"},
-                "5210": {"nama": "HPP", "tipe": "HPP", "saldo_normal": "debit"},
-
+                "pembelian": "5110",
+                "hpp": "5210",
+                "harga pokok penjualan": "5210",
+                
                 # Beban Operasional
-                "6110": {"nama": "Beban Perlengkapan", "tipe": "Beban", "saldo_normal": "debit"},
-                "6120": {"nama": "Beban TLA", "tipe": "Beban", "saldo_normal": "debit"},
-                "6130": {"nama": "Beban Penyusutan", "tipe": "Beban", "saldo_normal": "debit"},
-                "6140": {"nama": "Beban Lain-Lain", "tipe": "Beban", "saldo_normal": "debit"},
+                "beban perlengkapan": "6110",
+                "beban tla": "6120",  # Beban Listrik, Air, Telepon
+                "beban listrik": "6120",
+                "beban air": "6120",
+                "beban telepon": "6120",
+                "beban listrik air telepon": "6120",
+                "beban listrik air": "6120",
+                "beban listrik telepon": "6120",
+                "beban penyusutan": "6130",
+                "beban lain-lain": "6140",
+                "beban lain": "6140",
             }
             
             # Cari mapping berdasarkan nama
             for key, kode in akun_mapping.items():
-                if key in nama_lower:
-                    return kode, CHART_OF_ACCOUNTS[kode]['nama']
+                if key in nama_lower or nama_lower in key:
+                    if kode in CHART_OF_ACCOUNTS:
+                        return kode, CHART_OF_ACCOUNTS[kode]['nama']
+                    else:
+                        # Jika kode tidak ada di CHART_OF_ACCOUNTS, gunakan nama asli
+                        return kode, akun_nama
             
             # Jika tidak ditemukan, coba cari partial match di CHART_OF_ACCOUNTS
             for kode, info in CHART_OF_ACCOUNTS.items():
-                if info['nama'].lower() in nama_lower or nama_lower in info['nama'].lower():
+                info_nama_lower = info['nama'].lower()
+                if info_nama_lower in nama_lower or nama_lower in info_nama_lower:
                     return kode, info['nama']
             
             # Default: gunakan nama asli
@@ -11864,14 +12082,15 @@ def neraca_lajur():
         for akun_nama, nsa_info in nsa_consolidated.items():
             kode_akun, nama_normal = normalize_akun_data(akun_nama)
             
-            if not kode_akun:
-                kode_akun = akun_nama
+            if kode_akun is None:
+                # Jika tidak dapat menemukan kode akun, gunakan format khusus
+                kode_akun = f"TEMP_{akun_nama.replace(' ', '_').upper()}"
             
             akun_data[kode_akun] = {
                 'nama_akun': nama_normal,
                 'kode_akun': kode_akun,
-                'neraca_debit': float(nsa_info['debit']),
-                'neraca_kredit': float(nsa_info['kredit']),
+                'neraca_debit': float(nsa_info.get('debit', 0) or 0),
+                'neraca_kredit': float(nsa_info.get('kredit', 0) or 0),
                 'penyesuaian_debit': 0,
                 'penyesuaian_kredit': 0,
                 'nssp_debit': 0,
@@ -11892,8 +12111,8 @@ def neraca_lajur():
             
             kode_akun, nama_normal = normalize_akun_data(akun_nama)
             
-            if not kode_akun:
-                kode_akun = akun_nama
+            if kode_akun is None:
+                kode_akun = f"TEMP_{akun_nama.replace(' ', '_').upper()}"
             
             if kode_akun not in akun_data:
                 akun_data[kode_akun] = {
@@ -11919,8 +12138,8 @@ def neraca_lajur():
             
             kode_akun, nama_normal = normalize_akun_data(akun_nama)
             
-            if not kode_akun:
-                kode_akun = akun_nama
+            if kode_akun is None:
+                kode_akun = f"TEMP_{akun_nama.replace(' ', '_').upper()}"
             
             if kode_akun not in akun_data:
                 akun_data[kode_akun] = {
@@ -11960,15 +12179,22 @@ def neraca_lajur():
             else:
                 # Fallback berdasarkan nama
                 nama_lower = data['nama_akun'].lower()
-                if 'kas' in nama_lower or 'piutang' in nama_lower or 'persediaan' in nama_lower or 'perlengkapan' in nama_lower or 'tanah' in nama_lower or 'bangunan' in nama_lower or 'kendaraan' in nama_lower or 'peralatan' in nama_lower:
+                if ('kas' in nama_lower or 'piutang' in nama_lower or 
+                    'persediaan' in nama_lower or 'perlengkapan' in nama_lower or 
+                    'tanah' in nama_lower or 'bangunan' in nama_lower or 
+                    'kendaraan' in nama_lower or 'peralatan' in nama_lower or 
+                    'inventaris' in nama_lower):
                     data['tipe_akun'] = 'asset'
-                elif 'utang' in nama_lower or 'hutang' in nama_lower or 'diterima dimuka' in nama_lower:
+                elif ('utang' in nama_lower or 'hutang' in nama_lower or 
+                      'diterima dimuka' in nama_lower or 'dimuka' in nama_lower):
                     data['tipe_akun'] = 'liability'
-                elif 'modal' in nama_lower or 'prive' in nama_lower:
+                elif ('modal' in nama_lower or 'prive' in nama_lower or 
+                      'ikhtisar' in nama_lower):
                     data['tipe_akun'] = 'equity'
-                elif 'penjualan' in nama_lower or 'pendapatan' in nama_lower:
+                elif ('penjualan' in nama_lower or 'pendapatan' in nama_lower):
                     data['tipe_akun'] = 'income'
-                elif 'hpp' in nama_lower or 'harga pokok' in nama_lower or 'pembelian' in nama_lower or 'beban' in nama_lower:
+                elif ('hpp' in nama_lower or 'harga pokok' in nama_lower or 
+                      'pembelian' in nama_lower or 'beban' in nama_lower):
                     data['tipe_akun'] = 'expense'
                 else:
                     data['tipe_akun'] = 'other'
@@ -12066,7 +12292,7 @@ def neraca_lajur():
                     modal_key = kode_akun
                     break
         
-        if modal_key:
+        if modal_key and modal_key in akun_real:
             if laba_rugi_bersih > 0:  # Laba
                 akun_real[modal_key]['posisi_keuangan_kredit'] += laba_rugi_bersih
             elif laba_rugi_bersih < 0:  # Rugi
@@ -12228,7 +12454,6 @@ def neraca_lajur():
         """
         
         # 19. GENERATE HTML DENGAN STYLING PINK
-        # (CSS tetap sama seperti sebelumnya, hanya logika yang diubah)
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -12910,7 +13135,7 @@ def laporan_perubahan_modal():
         """
     
 # ============================================================
-# 🔹 ROUTE: Prive - DIPERBAIKI untuk integrasi dengan modal
+# 🔹 ROUTE: Prive
 # ============================================================
 @app.route("/prive", methods=["GET", "POST"])
 def prive():
@@ -13738,7 +13963,7 @@ def generate_prive_html(user_email, message, prive_data, modal_data_all, total_p
     """
     return prive_html
 # ============================================================
-# 🔹 ROUTE: Input Modal Awal - BARU
+# 🔹 ROUTE: Input Modal Awal
 # ============================================================
 @app.route("/input-modal-awal", methods=["GET", "POST"])
 def input_modal_awal():
@@ -14230,7 +14455,7 @@ def generate_modal_awal_html(user_email, message, sudah_ada_modal_awal):
     return html
 
 # ============================================================
-# 🔹 ROUTE: Aset (Menu Utama) - UPDATED dengan REAL DATA
+# 🔹 ROUTE: Aset (Menu Utama) 
 # ============================================================
 @app.route("/aset")
 def aset():
